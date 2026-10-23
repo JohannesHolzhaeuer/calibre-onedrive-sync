@@ -40,7 +40,12 @@ class OneDriveSyncAction(InterfaceActionBase):
         """Open the configuration dialog (picked up by Preferences)."""
         from .gui.config_widget import open_config
 
-        open_config(parent=gui)
+        default_library_path = ""
+        try:
+            default_library_path = str(gui.current_db.library_path)
+        except Exception:  # noqa: BLE001 - no library open / headless caller
+            pass
+        open_config(parent=gui, default_library_path=default_library_path)
 
     def customization_help(self, gui=False):
         """Return help text so the plugin is reported as customizable.

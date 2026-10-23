@@ -80,6 +80,17 @@ def test_fields_and_apply(monkeypatch, prefs_backend, tmp_path):
     assert saved.debug is True
 
 
+def test_delete_removed_only_persists_in_mirror_mode(monkeypatch, prefs_backend, tmp_path):
+    widget = _widget(monkeypatch, prefs_backend, tmp_path)
+    widget.delete_removed.setChecked(True)
+
+    widget.sync_mode.setCurrentIndex(widget.sync_mode.findData("backup"))
+    assert widget.fields()["delete_removed"] is False
+
+    widget.sync_mode.setCurrentIndex(widget.sync_mode.findData("mirror"))
+    assert widget.fields()["delete_removed"] is True
+
+
 def test_validate_reports_errors_and_success(monkeypatch, prefs_backend, tmp_path):
     widget = _widget(monkeypatch, prefs_backend, tmp_path)
 
