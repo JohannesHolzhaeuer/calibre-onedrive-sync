@@ -1,0 +1,93 @@
+name: CI
+
+# Every pull request and every push to main runs the same quality gates:
+# ruff lint/format, the pytest suite, and the plugin zip build with
+# ROOT-level artifact validation (catches the "zipped src/ by mistake" bug).
+# The built dist/onedrive-sync.zip is uploaded as a workflow artifact from PRs
+# so it can be downloaded for manual testing.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  # Required for the tokenless Codecov upload via GitHub OIDC. When a
+  # CODECOV_TOKEN secret is configured it takes precedence over OIDC.
+  id-token: write
+
+jobs:
+  lint-test-build:
+    name: lint, test, build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      # Only dev-only tooling. The plugin runtime has ZERO pip dependencies:
+      # ruff, pytest and pytest-cov must never become plugin import dependencies.
+      - name: Install dev tooling
+        run: |
+          pip install --upgrade pip
+          pip install ruff pytest pytest-cov
+
+      - name: Lint (ruff check)
+        run: ruff check src tests build build.py
+
+      - name: Format (ruff format --check)
+        run: ruff format --check src tests build build.py
+
+      - name: Version module in sync (release-please pre-flight)
+        run: |
+          python build/sync_version.py --check || { echo "run python build/sync_version.py"; exit 1; }
+
+      - name: Build plugin zip
+        run: python build.py
+
+      - name: Test (pytest + coverage)
+        run: pytest --cov --cov-report=term-missing --cov-report=xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          files: ./coverage.xml
+          flags: unittests
+          # A missing/invalid upload must not block the test job; coverage is
+          # still enforced locally by the `fail_under = 90` floor above.
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+          use_oidc: ${{ secrets.CODECOV_TOKEN == '' }}
+
+      # VALIDATE the artifact: __init__.py and the import-name marker must sit
+      # at the ZIP ROOT. If the src/ folder itself were zipped, calibre would
+      # resolve imports as calibre_plugins.onedrive_sync.src.* and break.
+      - name: Validate artifact ROOT entries
+        run: |
+          cd dist
+          python - <<'PY'
+          import zipfile
+          with zipfile.ZipFile('onedrive-sync.zip') as zf:
+              names = zf.namelist()
+          top = {name.split('/', 1)[0] for name in names}
+          missing = []
+          if '__init__.py' not in top:
+              missing.append('__init__.py')
+          if 'plugin-import-name-onedrive_sync.txt' not in top:
+              missing.append('plugin-import-name-onedrive_sync.txt')
+          assert not missing, f'ZIP ROOT missing: {missing}'
+          assert not any(name.startswith('src/') for name in names), 'src/ leaked into ZIP'
+          print('ZIP ROOT validation OK: __init__.py + import-name marker present')
+          PY
+
+      - name: Upload plugin zip
+        uses: actions/upload-artifact@v7
+        with:
+          name: onedrive-sync-zip
+          path: dist/onedrive-sync.zip
+          if-no-files-found: error

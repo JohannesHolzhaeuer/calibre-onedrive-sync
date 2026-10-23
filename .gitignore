@@ -1,0 +1,28 @@
+# Build output: only what build.py produces into dist/
+dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+.venv/
+venv/
+
+# Node (commitlint tooling)
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local tooling
+.vs/
+*.pyproj.user
+obj/

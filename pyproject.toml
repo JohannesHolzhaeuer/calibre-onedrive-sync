@@ -1,0 +1,55 @@
+[project]
+name = "onedrive-sync"
+description = "A calibre plugin that syncs the library with a OneDrive folder."
+authors = [{ name = "Johannes Holzhaeuer" }]
+readme = "README.md"
+requires-python = ">=3.11"
+version = "0.1.0"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+]
+
+# ---------------------------------------------------------------------------
+# pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-ra"
+
+# ---------------------------------------------------------------------------
+# coverage (reported to Codecov by CI)
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["src"]
+relative_files = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+# Hard floor for CI: a change that drops total statement coverage below this
+# fails `pytest --cov` (and therefore the test job).
+fail_under = 90
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+]
+
+# ---------------------------------------------------------------------------
+# ruff (linter + formatter)
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["onedrive_sync"]

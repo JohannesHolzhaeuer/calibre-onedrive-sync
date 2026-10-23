@@ -1,0 +1,40 @@
+version: 2
+updates:
+  # Python dev tooling (pyproject.toml optional-dependencies).
+  # The plugin runtime has ZERO pip dependencies, so only ruff + pytest
+  # are ever tracked here.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+  # Dev-only Node tooling (commitlint + TypeScript), tracked in package.json.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+
+  # GitHub Actions used by the workflows under .github/workflows/.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "github_actions"
+    commit-message:
+      prefix: "ci"
+      include: "scope"

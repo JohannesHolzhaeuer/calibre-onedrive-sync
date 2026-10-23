@@ -1,0 +1,74 @@
+name: release-please
+
+# Release automation:
+#   * googleapis/release-please-action (release-type: python) opens and
+#     maintains a release PR on every feature merge into main: it bumps
+#     pyproject.toml `[project].version`, rewrites src/common/version.py (via
+#     the `# x-release-please-version` marker), and regenerates CHANGELOG.md
+#     from Conventional Commits.
+#   * Merging that PR into main tags a release (vX.Y.Z). release-please creates
+#     a DRAFT release (`"draft": true` in release-please-config.json) because
+#     this repository enables immutable releases: assets cannot be added after
+#     a release is published. `.github/workflows/release-artifact.yml` builds
+#     the plugin zip, uploads it to the draft, and then publishes the release.
+#
+# The reusable workflow is called in the same run because a separate
+# `release: published` trigger would NOT fire when release-please uses the
+# workflow GITHUB_TOKEN (GitHub suppresses workflow runs caused by that token).
+#
+# Optional: when the `holzhaeuer-release` GitHub App is configured (repository
+# variable HOLZHAEUER_RELEASE_APP_ID and secret
+# HOLZHAEUER_RELEASE_PRIVATE_KEY), its token is used instead. This is not
+# required for attaching the zip, but makes release-please's own events start
+# other workflows.
+#
+# Single place version lives for release-please: `pyproject.toml`. The runtime
+# module `src/common/version.py` is kept in sync by the marker rewrite AND by
+# `build/sync_version.py` (also invoked from CI on main).
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Manage release PR / release
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - name: Create GitHub App token (optional)
+        id: app-token
+        if: ${{ vars.HOLZHAEUER_RELEASE_APP_ID != '' }}
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.HOLZHAEUER_RELEASE_APP_ID }}
+          private-key: ${{ secrets.HOLZHAEUER_RELEASE_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+          release-type: python
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  release-artifact:
+    name: Build + attach plugin zip
+    needs: release-please
+    if: needs.release-please.outputs.tag_name != ''
+    uses: ./.github/workflows/release-artifact.yml
+    with:
+      tag_name: ${{ needs.release-please.outputs.tag_name }}
+      sha: ${{ needs.release-please.outputs.sha }}
+      publish: true
+    permissions:
+      contents: write

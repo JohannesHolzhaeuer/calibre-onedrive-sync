@@ -1,0 +1,43 @@
+name: commitlint
+
+# Validate Conventional Commits on every PR using the real commitlint CLI and
+# the TypeScript config in `commitlint.config.ts`. release-please relies on the
+# same rules to determine the next version and to build the changelog.
+# It checks:
+#   * the PR title,
+#   * every non-merge commit on the PR branch (subject line, squash-merge
+#     friendly — commitlint ignores merge commits by default).
+
+on:
+  pull_request:
+    types: [opened, synchronize, edited, reopened]
+
+jobs:
+  conventional-commits:
+    name: Conventional Commits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (with full history)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install tooling
+        run: npm ci --ignore-scripts
+
+      - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s' "$PR_TITLE" | npx commitlint --verbose
+
+      - name: Validate PR commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: npx commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose

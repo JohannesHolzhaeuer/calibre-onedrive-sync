@@ -1,0 +1,80 @@
+name: release-artifact
+
+# Builds the plugin zip and attaches it to a GitHub Release. Invoked by
+# `.github/workflows/release-please.yml` as a reusable workflow when the release
+# PR is merged. release-please creates a DRAFT release because this repository
+# enables immutable releases: assets cannot be added after publication. This
+# workflow uploads the zip to the draft and then publishes it, so the asset is
+# part of the immutable release snapshot.
+
+on:
+  workflow_call:
+    inputs:
+      tag_name:
+        description: Release tag to attach the plugin zip to
+        required: true
+        type: string
+      sha:
+        description: Commit SHA to build (falls back to the tag when empty)
+        required: false
+        default: ""
+        type: string
+      publish:
+        description: Publish the draft release after uploading the zip
+        required: false
+        default: true
+        type: boolean
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Draft release tag to attach the plugin zip to
+        required: true
+        type: string
+      sha:
+        description: Commit SHA to build (optional; defaults to the tag)
+        required: false
+        default: ""
+        type: string
+      publish:
+        description: Publish the draft release after uploading the zip
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload:
+    name: Build + attach dist/onedrive-sync.zip
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha || inputs.tag_name }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Sync runtime version module
+        run: |
+          python build/sync_version.py --check || python build/sync_version.py
+
+      - name: Build plugin zip
+        run: python build.py
+
+      - name: Upload zip to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ inputs.tag_name }}" dist/onedrive-sync.zip --clobber
+
+      - name: Publish release
+        if: ${{ inputs.publish }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ inputs.tag_name }}" --draft=false
