@@ -116,9 +116,14 @@ def test_plugin_initialize_and_do_user_config(monkeypatch):
     opened = []
     monkeypatch.setattr(
         "onedrive_sync.gui.config_widget.open_config",
-        lambda parent=None: opened.append(parent),
+        lambda parent=None, *, default_library_path="": opened.append(
+            (parent, default_library_path)
+        ),
     )
-    gui = SimpleNamespace()
+    gui = SimpleNamespace(current_db=SimpleNamespace(library_path="C:/Books"))
     plugin.do_user_config(gui)
-    assert opened == [gui]
+    assert opened == [(gui, "C:/Books")]
     assert "OneDrive" in plugin.customization_help()
+
+    plugin.do_user_config(None)
+    assert opened[-1] == (None, "")

@@ -114,12 +114,15 @@ class ConfigWidget(QWidget):
 
     def fields(self) -> dict:
         """Collect the current widget values into a settings dict."""
+        mode = self.sync_mode.currentData() or "backup"
         return {
             "library_path": self.library_path.text().strip(),
             "onedrive_folder": self.onedrive_folder.text().strip(),
             "remote_subfolder": self.remote_subfolder.text().strip(),
-            "sync_mode": self.sync_mode.currentData() or "backup",
-            "delete_removed": self.delete_removed.isChecked(),
+            "sync_mode": mode,
+            # Deletion only makes sense in mirror mode; never persist a stale
+            # checkbox from a previous mirror selection.
+            "delete_removed": mode == "mirror" and self.delete_removed.isChecked(),
             "include_metadata_db": self.include_metadata_db.isChecked(),
             "debug": self.debug.isChecked(),
         }
