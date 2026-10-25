@@ -5,21 +5,27 @@ Guidance for AI coding agents (and humans) working in this repository.
 ## Project overview
 
 `calibre-onedrive-sync` is a **calibre 9** plugin that syncs a calibre library
-with a folder in OneDrive. It uses the **locally synced OneDrive folder** that
-the OneDrive desktop client maintains; it does not talk to the Microsoft Graph
-API and never handles Microsoft credentials.
+with a folder in OneDrive. It talks to **Microsoft Graph** with OAuth 2.0's
+**device-code flow**. The local OneDrive desktop client is not required; the
+selected folder may be on the user's drive or shared with them.
 
 A calibre zip registers exactly **one** `Plugin` subclass, so the zip declares a
 single **interface action** (`OneDriveSyncAction` in `src/__init__.py`).
 
 Hard product constraints:
 
-- **No cloud API / no OAuth.** The plugin only reads and writes the local
-  OneDrive sync folder. OneDrive handles authentication and transfer.
+- **No password handling, no cloud SDK.** Authentication is delegated to
+  Microsoft's device-code flow. Only a refresh token is persisted; the
+  short-lived access token stays in memory. Never add `requests`, MSAL, or any
+  other third-party runtime dependency.
+- **Graph access is folder-scoped by behaviour.** The app requests delegated
+  `Files.ReadWrite.All` (needed for shared folders), but the plugin must only
+  touch the folder the user selected and the export subfolder beneath it.
 - **Runtime dependencies are calibre-bundled only.** `pytest`, `pytest-cov` and
   `ruff` are dev/CI-only and must never be imported by plugin runtime code.
-- **Never sync a library into itself.** Validation rejects overlapping source
-  and target folders; keep that invariant when adding the sync engine.
+- **Never sync a library into itself.** The plugin works remotely, but keep the
+  invariant that the target is a dedicated OneDrive folder, never the calibre
+  library folder.
 
 ## Repository layout
 
@@ -34,14 +40,26 @@ Hard product constraints:
 │   ├── __init__.py                # OneDriveSyncAction (InterfaceActionBase) — must sit at zip ROOT
 │   ├── plugin-import-name-onedrive_sync.txt   # calibre import-namespace marker
 │   ├── common/                    # calibre-independent, unit-testable logic
-│   │   ├── config.py              # persistent settings (JSONConfig)
+│   │   ├── auth.py                # access-token cache + refresh-token store
+│   │   ├── config.py              # persistent settings + token storage
+│   │   ├── errors.py              # typed plugin errors
+│   │   ├── graph.py               # Microsoft Graph client (drives, delta, upload/download)
+│   │   ├── http.py                # urllib transport with test seams
 │   │   ├── i18n.py                # shared `_` translation hook
 │   │   ├── log.py                 # logger factory
-│   │   ├── paths.py               # path helpers + validation
+│   │   ├── models.py              # dataclasses shared by the layers
+│   │   ├── oauth.py               # device-code + refresh flows
+│   │   ├── state.py               # SQLite import/export/delta state
+│   │   ├── sync.py                # import/export engine (network injected)
 │   │   └── version.py             # runtime version mirror (release-please-managed)
 │   ├── gui/                       # calibre/Qt layer (guarded imports)
 │   │   ├── action.py              # InterfaceAction wiring
-│   │   └── config_widget.py       # configuration dialog
+│   │   ├── auth_dialog.py         # device-code sign-in dialog
+│   │   ├── config_widget.py       # configuration dialog
+│   │   ├── folder_picker.py       # Graph-backed OneDrive folder browser
+│   │   ├── library.py             # calibre DB adapter + add-book helper
+│   │   ├── scheduler.py           # DB listener + debounce + timer
+│   │   └── sync_job.py            # ThreadedJob + GUI-thread add-book marshalling
 │   └── resources/images/          # toolbar icon
 ├── tests/                         # pytest suite (imports the package from src/)
 └── .github/                       # workflows, release-please, dependabot
@@ -66,6 +84,12 @@ Hard product constraints:
    standard library and calibre's bundled modules.
 6. **Mark user-facing strings with `_()`** at the point of use; never bind the
    result to a module constant at import time.
+7. **All network access goes through `common.http`.** Keep the injectable
+   `transport` / `downloader` seams so tests never touch Microsoft; do not call
+   `urllib` directly from the engine or GUI.
+8. **GUI-thread rule.** Long sync work runs in a `ThreadedJob`. Adding books to
+   the calibre DB must happen on the GUI thread via
+   `MainThreadBookAdder`; never call the calibre API from the worker.
 
 ## How to build
 
@@ -112,9 +136,30 @@ base branch (project) plus coverage of new lines (patch).
   `release-artifact.yml` uploads the built plugin zip to the draft and then
   publishes it (releases are immutable, so assets cannot be added later).
 
+## Authentication and sync design
+
+- The user supplies a Microsoft Entra **Application (client) ID** in the
+  configuration dialog; there is no bundled app registration. The tenant is
+  `common` so personal and work/school accounts both work.
+- Scopes: `offline_access Files.ReadWrite.All User.Read`. `offline_access`
+  yields the refresh token; the access token is cached in memory only.
+- `AuthManager` refreshes on expiry and retries one Graph request after a 401.
+  `ConfigTokenStore` persists the refresh token (keyring if available, otherwise
+  calibre JSON config).
+- The folder picker uses `/me/drives` plus shortcuts (`remoteItem`) so shared
+  drives/folders can be selected. Keep all later requests scoped to the chosen
+  `drive_id`/`folder_id`.
+- Import state stores `(drive_id, item_id)` so remote files are never imported
+  twice. Export state stores `(book_id, format)` plus the remote item id so
+  updates replace the same file. Delta links are stored per drive/folder.
+- Scheduling combines the calibre DB listener, a `QFileSystemWatcher` fallback,
+  a debounce timer, and a periodic timer. The scheduler is suspended while a
+  sync runs to avoid feedback loops.
+
 ## When adding a feature
 
-1. Put pure logic in `src/common/` and add tests in `tests/`.
+1. Put pure logic in `src/common/` and add tests in `tests/`; inject network via
+   `common.http` and calibre via the `Library` protocol in `common.sync`.
 2. Wire any UI into `src/gui/` behind guarded imports; never do blocking file
    I/O on the GUI thread (use calibre jobs for long syncs).
 3. Add user-facing strings via `_()`.

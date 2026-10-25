@@ -1,14 +1,19 @@
-"""Persistent settings for the onedrive-sync plugin.
+"""Persistent settings and refresh-token storage for the OneDrive sync.
 
 This module is the single source of truth for stored configuration. It is
-GUI-free: it may import ``calibre.utils.config`` (JSONConfig) but must NOT
-import ``qt`` or ``calibre.gui2``, so it stays importable in a non-GUI /
-headless process.
+GUI-free: it may import ``calibre.utils.config`` (JSONConfig) and calibre's
+keyring helper, but must NOT import ``qt`` or ``calibre.gui2``.
+
+The refresh token is a secret. It is stored in the platform keyring when
+available and only falls back to calibre's JSON config when the keyring is not
+usable. The short-lived access token is never persisted.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
+
+from .auth import TokenStore
 
 try:
     from calibre.utils.config import JSONConfig
@@ -17,23 +22,31 @@ except ImportError:  # pragma: no cover - only hit outside the calibre runtime
 
 #: JSONConfig root key for this plugin's settings.
 _PLUGIN_KEY = "plugins/onedrive_sync"
+_REFRESH_TOKEN_KEY = "onedrive_sync.refresh_token"
 
-#: Supported sync strategies. ``backup`` only adds/updates files in OneDrive;
-#: ``mirror`` also removes files that no longer exist in the calibre library.
-SYNC_MODES = ("backup", "mirror")
-DEFAULT_SYNC_MODE = "backup"
+EXPORT_FORMATS = ("epub_or_pdf", "epub", "pdf")
+DEFAULT_EXPORT_FORMAT = "epub_or_pdf"
+DEFAULT_SYNC_INTERVAL = 15
+MIN_SYNC_INTERVAL = 1
+MAX_SYNC_INTERVAL = 1440
 
 
 @dataclass
 class Settings:
     """User-visible configuration for the OneDrive sync."""
 
-    library_path: str = ""
-    onedrive_folder: str = ""
-    remote_subfolder: str = "calibre-library"
-    sync_mode: str = DEFAULT_SYNC_MODE
-    delete_removed: bool = False
-    include_metadata_db: bool = True
+    client_id: str = ""
+    account_name: str = ""
+    drive_id: str = ""
+    folder_id: str = ""
+    folder_path: str = ""
+    folder_name: str = ""
+    export_subfolder: str = "Calibre Export"
+    export_format: str = DEFAULT_EXPORT_FORMAT
+    import_enabled: bool = True
+    export_enabled: bool = True
+    auto_sync: bool = True
+    sync_interval_minutes: int = DEFAULT_SYNC_INTERVAL
     debug: bool = False
 
     def as_dict(self) -> dict:
@@ -50,13 +63,21 @@ class Settings:
             value = data.get(field.name, default)
             if isinstance(default, bool):
                 values[field.name] = bool(value)
+            elif isinstance(default, int):
+                try:
+                    values[field.name] = int(value)
+                except (TypeError, ValueError):
+                    values[field.name] = default
             elif isinstance(default, str):
                 values[field.name] = default if value is None else str(value)
-            else:  # pragma: no cover - every current field is bool/str
+            else:  # pragma: no cover - every current field is bool/int/str
                 values[field.name] = value
         settings = cls(**values)
-        if settings.sync_mode not in SYNC_MODES:
-            settings.sync_mode = DEFAULT_SYNC_MODE
+        settings.sync_interval_minutes = max(
+            MIN_SYNC_INTERVAL, min(MAX_SYNC_INTERVAL, settings.sync_interval_minutes)
+        )
+        if settings.export_format not in EXPORT_FORMATS:
+            settings.export_format = DEFAULT_EXPORT_FORMAT
         return settings
 
 
@@ -86,10 +107,72 @@ def save_settings(settings: Settings) -> None:
 
 
 def is_configured(settings: Settings | None = None) -> bool:
-    """True when enough paths are set for a sync attempt."""
+    """True when the app ID and target folder are selected."""
     current = settings if settings is not None else load_settings()
-    return bool(
-        current.library_path.strip()
-        and current.onedrive_folder.strip()
-        and current.remote_subfolder.strip()
-    )
+    return bool(current.client_id.strip() and current.drive_id and current.folder_id)
+
+
+# -- refresh-token storage --------------------------------------------------
+
+
+def _keyring():
+    try:
+        from calibre.utils import keyring
+
+        return keyring
+    except Exception:  # noqa: BLE001 - keyring is best-effort
+        return None
+
+
+def get_refresh_token() -> str:
+    """Return the stored refresh token (keyring first, JSON fallback)."""
+    ring = _keyring()
+    if ring is not None:
+        try:
+            token = ring.prefs.get(_REFRESH_TOKEN_KEY, "")
+            if token:
+                return str(token)
+        except Exception:  # noqa: BLE001
+            pass
+    if prefs is not None:
+        try:
+            return str(prefs.get("refresh_token", "") or "")
+        except Exception:  # noqa: BLE001 - a corrupt value means "signed out"
+            return ""
+    return ""
+
+
+def set_refresh_token(token: str) -> None:
+    """Persist the refresh token, preferring the platform keyring."""
+    token = token or ""
+    stored_in_keyring = False
+    ring = _keyring()
+    if ring is not None:
+        try:
+            if token:
+                ring.prefs[_REFRESH_TOKEN_KEY] = token
+            else:
+                ring.prefs.pop(_REFRESH_TOKEN_KEY, None)
+            stored_in_keyring = True
+        except Exception:  # noqa: BLE001
+            stored_in_keyring = False
+    if prefs is not None:
+        prefs.set("refresh_token", "" if stored_in_keyring else token)
+
+
+def clear_refresh_token() -> None:
+    """Forget the persisted refresh token."""
+    set_refresh_token("")
+
+
+class ConfigTokenStore(TokenStore):
+    """TokenStore backed by calibre's keyring/JSON config."""
+
+    def get(self) -> str:
+        return get_refresh_token()
+
+    def set(self, token: str) -> None:
+        set_refresh_token(token)
+
+    def clear(self) -> None:
+        clear_refresh_token()
