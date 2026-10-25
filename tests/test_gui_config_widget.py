@@ -21,6 +21,7 @@ def base_settings(**overrides):
         "folder_path": "/Books",
         "folder_name": "Books",
         "export_subfolder": "Export",
+        "export_directly": False,
         "export_format": "pdf",
         "import_enabled": True,
         "export_enabled": True,
@@ -53,6 +54,7 @@ def test_load_and_fields(monkeypatch):
     assert fields["drive_id"] == "drive"
     assert fields["folder_id"] == "folder"
     assert fields["export_subfolder"] == "Export"
+    assert fields["export_directly"] is False
     assert fields["export_format"] == "pdf"
 
 
@@ -61,6 +63,15 @@ def test_fields_normalize_empty_subfolder(monkeypatch):
     widget.export_subfolder.setText("")
     assert widget.fields()["export_subfolder"] == "Calibre Export"
     assert "Calibre Export" in widget.preview.text()
+
+
+def test_export_directly_disables_subfolder_and_updates_preview(monkeypatch):
+    widget = widget_with(monkeypatch)
+    widget.export_directly.setChecked(True)
+    widget._on_export_directly_toggled(True)
+    assert not widget.export_subfolder.isEnabled()
+    assert widget.fields()["export_directly"] is True
+    assert widget.preview.text() == "New books are uploaded to: /Books"
 
 
 def test_load_without_folder_or_token(monkeypatch):

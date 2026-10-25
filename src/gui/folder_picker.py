@@ -1,18 +1,21 @@
 """OneDrive folder picker for the signed-in user's own drive.
 
-Loading the drive and its children happens on short-lived ``QThread`` workers so
-the configuration dialog never blocks on the network.
+Folders are loaded lazily into a tree so large drives stay responsive. Loading
+happens on short-lived ``QThread`` workers; the configuration dialog never
+blocks on the network.
 """
 
 from __future__ import annotations
 
 from qt.core import (
-    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    Qt,
     QThread,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     pyqtSignal,
 )
@@ -53,26 +56,26 @@ class _LoadFolders(QThread):
             root = None
             if self.folder_id is None:
                 root = self.graph.get_root_item(self.drive_id)
-            children = self.graph.list_children(self.drive_id, self.folder_id)
-            self.loaded.emit({"root": root, "children": children})
+                folder_id = root.id
+            else:
+                folder_id = self.folder_id
+            children = self.graph.list_children(self.drive_id, folder_id)
+            self.loaded.emit({"root": root, "folder_id": folder_id, "children": children})
         except Exception as exc:  # noqa: BLE001 - surfaced in the dialog
             self.failed.emit(str(exc))
 
 
 class FolderPickerDialog(QDialog):
-    """Browse OneDrive folders and pick a destination."""
+    """Browse the user's OneDrive folders and pick a destination."""
 
     def __init__(self, graph, parent=None, *, initial: FolderRef | None = None) -> None:
         super().__init__(parent)
         self.graph = graph
         self.initial = initial
         self.selected: FolderRef | None = None
-        self._drives: list[DriveInfo] = []
-        self._current_drive = ""
-        self._current_item: str | None = None
-        self._current_path = "/"
-        self._current_name = ""
-        self._stack: list[tuple[str, str | None, str, str]] = []
+        self._drive: DriveInfo | None = None
+        self._loaded: set[str] = set()
+        self._loading: set[str] = set()
         self._thread = None
         self._build_ui()
 
@@ -80,44 +83,33 @@ class FolderPickerDialog(QDialog):
         layout = QVBoxLayout(self)
         self.setWindowTitle(_("Choose OneDrive folder"))
 
-        layout.addWidget(QLabel(_("Drive")))
-        self.drive_combo = QComboBox()
-        self.drive_combo.currentIndexChanged.connect(self._on_drive_changed)
-        layout.addWidget(self.drive_combo)
+        self.summary = QLabel(_("Loading OneDrive…"))
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary)
 
-        layout.addWidget(QLabel(_("Current folder")))
-        self.path_label = QLabel("/")
-        self.path_label.setWordWrap(True)
-        layout.addWidget(self.path_label)
-
-        layout.addWidget(QLabel(_("Subfolders")))
-        self.folder_combo = QComboBox()
-        layout.addWidget(self.folder_combo)
-
-        buttons = QHBoxLayout()
-        self.open_button = QPushButton(_("Open"))
-        self.open_button.clicked.connect(self._open_selected)
-        self.up_button = QPushButton(_("Up"))
-        self.up_button.clicked.connect(self._up)
-        self.select_button = QPushButton(_("Select this folder"))
-        self.select_button.clicked.connect(self._select_current)
-        self.cancel_button = QPushButton(_("Cancel"))
-        self.cancel_button.clicked.connect(self.reject)
-        buttons.addWidget(self.open_button)
-        buttons.addWidget(self.up_button)
-        buttons.addWidget(self.select_button)
-        buttons.addWidget(self.cancel_button)
-        layout.addLayout(buttons)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderLabels([_("Folder")])
+        self.tree.itemExpanded.connect(self._on_expanded)
+        self.tree.currentItemChanged.connect(self._on_current_changed)
+        layout.addWidget(self.tree)
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
-        self._set_busy(True)
+
+        buttons = QHBoxLayout()
+        self.select_button = QPushButton(_("Select this folder"))
+        self.select_button.setEnabled(False)
+        self.select_button.clicked.connect(self._select_current)
+        self.cancel_button = QPushButton(_("Cancel"))
+        self.cancel_button.clicked.connect(self.reject)
+        buttons.addWidget(self.select_button)
+        buttons.addWidget(self.cancel_button)
+        layout.addLayout(buttons)
 
     def start(self) -> None:
-        """Load the drive list; call before ``exec()``."""
-        self._set_busy(True)
-        self.status.setText(_("Loading drives."))
+        """Load the user's OneDrive; call before ``exec()``."""
+        self.status.setText(_("Loading OneDrive."))
         worker = _LoadDrives(self.graph)
         worker.loaded.connect(self._on_drives_loaded)
         worker.failed.connect(self._on_error)
@@ -130,118 +122,116 @@ class FolderPickerDialog(QDialog):
         worker.start()
 
     def _on_drives_loaded(self, drives) -> None:
-        self._drives = list(drives or [])
-        self.drive_combo.clear()
-        for drive in self._drives:
-            label = drive.name or drive.id
-            if drive.owner:
-                label = f"{label} — {drive.owner}"
-            self.drive_combo.addItem(label, drive)
-        if not self._drives:
-            self._on_error(_("No OneDrive drives are available for this account."))
+        available = list(drives or [])
+        if not available:
+            self._on_error(_("The OneDrive drive is not available for this account."))
             return
-        index = 0
-        if self.initial is not None:
-            for candidate, drive in enumerate(self._drives):
-                if drive.id == self.initial.drive_id:
-                    index = candidate
-                    break
-        current = self.drive_combo.currentIndex()
-        self.drive_combo.setCurrentIndex(index)
-        if current == index:
-            self._on_drive_changed()
-
-    def _on_drive_changed(self, *_args) -> None:
-        drive = self.drive_combo.currentData()
-        if not isinstance(drive, DriveInfo):
-            return
-        self._stack.clear()
-        self._navigate(drive.id, None, "/", "OneDrive")
-
-    def _navigate(
-        self,
-        drive_id: str,
-        item_id: str | None,
-        path: str,
-        name: str,
-        *,
-        push: bool = False,
-    ) -> None:
-        if push and self._current_drive:
-            self._stack.append(
-                (self._current_drive, self._current_item, self._current_path, self._current_name)
-            )
-        self._current_drive = drive_id
-        self._current_item = item_id
-        self._current_path = path
-        self._current_name = name
-        self.path_label.setText(path)
-        self.folder_combo.clear()
-        self._set_busy(True)
-        self.status.setText(_("Loading folders."))
-        worker = _LoadFolders(self.graph, drive_id, item_id)
-        worker.loaded.connect(self._on_folders_loaded)
-        worker.failed.connect(self._on_error)
-        self._start_worker(worker)
-
-    def _on_folders_loaded(self, payload) -> None:
-        root = payload.get("root") if isinstance(payload, dict) else None
-        if self._current_item is None and isinstance(root, RemoteItem):
-            self._current_item = root.id
-            self._current_name = root.name or self._current_name
-        children = payload.get("children") if isinstance(payload, dict) else payload
-        self.folder_combo.clear()
-        for child in children or []:
-            if isinstance(child, RemoteItem) and child.is_folder and not child.deleted:
-                path = f"{self._current_path.rstrip('/')}/{child.name}"
-                self.folder_combo.addItem(
-                    child.name,
-                    FolderRef(
-                        drive_id=child.drive_id or self._current_drive,
-                        item_id=child.id,
-                        name=child.name,
-                        path=path,
-                    ),
-                )
-        self._set_busy(False)
+        self._drive = available[0]
+        name = self._drive.name or _("OneDrive")
+        if self._drive.owner:
+            name = f"{name} - {self._drive.owner}"
+        self.summary.setText(name)
         self.status.setText("")
 
-    def _open_selected(self) -> None:
-        folder = self.folder_combo.currentData()
-        if not isinstance(folder, FolderRef):
-            return
-        self._navigate(
-            folder.drive_id,
-            folder.item_id,
-            folder.path,
-            folder.name,
-            push=True,
-        )
+        root = QTreeWidgetItem([name])
+        root.setData(0, Qt.ItemDataRole.UserRole, FolderRef(self._drive.id, "", name, "/"))
+        root.addChild(QTreeWidgetItem([_("Loading…")]))
+        self.tree.addTopLevelItem(root)
+        self.tree.setCurrentItem(root)
+        self._load_children(root, None)
+        self.tree.expandItem(root)
 
-    def _up(self) -> None:
-        if not self._stack:
+    def _load_children(self, item: QTreeWidgetItem, folder_id: str | None) -> None:
+        if self._drive is None:
             return
-        drive_id, item_id, path, name = self._stack.pop()
-        self._navigate(drive_id, item_id, path, name)
+        key = folder_id or "root"
+        if key in self._loaded or key in self._loading:
+            return
+        self._loading.add(key)
+        self.status.setText(_("Loading folders."))
+        worker = _LoadFolders(self.graph, self._drive.id, folder_id)
+        worker.loaded.connect(lambda payload, item=item: self._on_children_loaded(item, payload))
+        worker.failed.connect(lambda message, key=key: self._on_load_failed(key, message))
+        self._start_worker(worker)
+
+    def _on_children_loaded(self, item: QTreeWidgetItem, payload) -> None:
+        if not isinstance(payload, dict):
+            return
+        parent = item.data(0, Qt.ItemDataRole.UserRole)
+        if not isinstance(parent, FolderRef):
+            return
+
+        load_key = "root" if isinstance(payload.get("root"), RemoteItem) else parent.item_id
+        root = payload.get("root")
+        if isinstance(root, RemoteItem):
+            parent = FolderRef(
+                drive_id=parent.drive_id,
+                item_id=root.id,
+                name=root.name or parent.name,
+                path="/",
+            )
+            item.setData(0, Qt.ItemDataRole.UserRole, parent)
+            item.setText(0, parent.name)
+
+        self._loading.discard(load_key)
+        self._loaded.add(parent.item_id)
+        self._clear_children(item)
+        for child in payload.get("children") or []:
+            if not isinstance(child, RemoteItem) or not child.is_folder or child.deleted:
+                continue
+            if child.drive_id and child.drive_id != self._drive.id:
+                continue
+            path = f"{parent.path.rstrip('/')}/{child.name}"
+            folder = FolderRef(
+                drive_id=self._drive.id,
+                item_id=child.id,
+                name=child.name,
+                path=path,
+            )
+            node = QTreeWidgetItem([child.name])
+            node.setData(0, Qt.ItemDataRole.UserRole, folder)
+            node.addChild(QTreeWidgetItem([_("Loading…")]))
+            item.addChild(node)
+        self.status.setText("")
+        self._refresh_selection()
+
+    def _on_expanded(self, item: QTreeWidgetItem) -> None:
+        folder = item.data(0, Qt.ItemDataRole.UserRole)
+        if isinstance(folder, FolderRef) and folder.item_id:
+            self._load_children(item, folder.item_id)
+
+    def _on_current_changed(self, current, _previous=None) -> None:
+        self._refresh_selection()
+
+    def _refresh_selection(self) -> None:
+        folder = self._current_folder()
+        self.select_button.setEnabled(folder is not None and bool(folder.item_id))
+
+    def _current_folder(self) -> FolderRef | None:
+        item = self.tree.currentItem()
+        if item is None:
+            return None
+        folder = item.data(0, Qt.ItemDataRole.UserRole)
+        return folder if isinstance(folder, FolderRef) else None
+
+    @staticmethod
+    def _clear_children(item: QTreeWidgetItem) -> None:
+        while item.childCount():
+            item.takeChild(0)
 
     def _select_current(self) -> None:
-        self.selected = FolderRef(
-            drive_id=self._current_drive,
-            item_id=self._current_item or "",
-            name=self._current_name,
-            path=self._current_path,
-        )
+        folder = self._current_folder()
+        if folder is None or not folder.item_id:
+            return
+        self.selected = folder
         self.accept()
 
-    def _on_error(self, message: str) -> None:
-        self._set_busy(False)
-        self.status.setText(_("Could not load OneDrive: {message}").format(message=message))
+    def _on_load_failed(self, key: str, message: str) -> None:
+        self._loading.discard(key)
+        self._on_error(message)
 
-    def _set_busy(self, busy: bool) -> None:
-        self.open_button.setEnabled(not busy)
-        self.up_button.setEnabled(not busy and bool(self._stack))
-        self.select_button.setEnabled(not busy and bool(self._current_item))
-        self.drive_combo.setEnabled(not busy)
+    def _on_error(self, message: str) -> None:
+        self.status.setText(_("Could not load OneDrive: {message}").format(message=message))
 
     def reject(self) -> None:
         super().reject()

@@ -52,6 +52,8 @@ def test_export_records(tmp_path):
         assert state.is_exported(1, "epub", 1.0, 10)
         assert not state.is_exported(1, "epub", 2.0, 10)
         assert not state.is_exported(1, "epub", 1.0, 11)
+        assert state.is_exported_item("drive", "item")
+        assert not state.is_exported_item("drive", "other")
 
         record2 = ExportRecord(
             book_id=1,
