@@ -69,6 +69,8 @@ class DeviceCodeDialog(QDialog):
         self.profile: dict = {}
         self.signed_in = False
         self._device_code: DeviceCode | None = None
+        self.setMinimumSize(560, 260)
+        self.resize(620, 320)
         self._build_ui()
         self._worker = _AuthWorker(auth, profile_loader)
         self._worker.code_ready.connect(self._show_code)

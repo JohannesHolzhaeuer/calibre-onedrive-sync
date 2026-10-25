@@ -114,6 +114,12 @@ def dialog(monkeypatch):
     return widget, opened
 
 
+def test_dialog_has_readable_minimum_size(dialog):
+    widget, _opened = dialog
+    assert widget._minimum == (560, 260)
+    assert widget._size == (620, 320)
+
+
 def test_dialog_start_and_show_code(dialog):
     widget, opened = dialog
     widget.start()
