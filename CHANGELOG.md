@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/compare/v0.1.0...v0.2.0) (2026-10-25)
+
+
+### Features
+
+* add Microsoft Graph OneDrive sync ([#3](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/3)) ([200adc3](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/200adc3fde5f3cafb4f95d3a2ec79d99eb0911a8))
+
 ## 0.1.0 (2026-10-24)
 
 
