@@ -44,11 +44,20 @@ def test_zip_contains_package_modules(build_dir):
         names = zf.namelist()
     for expected in (
         "common/__init__.py",
+        "common/auth.py",
         "common/config.py",
-        "common/paths.py",
+        "common/graph.py",
+        "common/oauth.py",
+        "common/state.py",
+        "common/sync.py",
         "common/version.py",
         "gui/action.py",
+        "gui/auth_dialog.py",
         "gui/config_widget.py",
+        "gui/folder_picker.py",
+        "gui/library.py",
+        "gui/scheduler.py",
+        "gui/sync_job.py",
         "resources/images/onedrive.png",
     ):
         assert expected in names

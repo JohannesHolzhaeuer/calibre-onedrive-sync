@@ -16,9 +16,14 @@ import logging
 def get_logger(name: str, *, debug: bool = False) -> logging.Logger:
     """Return a named logger for ``name``.
 
-    ``debug`` (the plugin's ``Settings.debug``) raises the logger's threshold to
-    DEBUG so sync progress becomes visible; otherwise it stays at WARNING.
+    Loggers inherit the plugin-wide level set by :func:`configure_logging`.
+    Passing ``debug=True`` pins one logger to DEBUG.
     """
     logger = logging.getLogger(name)
-    logger.setLevel(logging.DEBUG if debug else logging.WARNING)
+    logger.setLevel(logging.DEBUG if debug else logging.NOTSET)
     return logger
+
+
+def configure_logging(debug: bool) -> None:
+    """Apply the ``Settings.debug`` switch to all plugin loggers."""
+    logging.getLogger("onedrive_sync").setLevel(logging.DEBUG if debug else logging.WARNING)

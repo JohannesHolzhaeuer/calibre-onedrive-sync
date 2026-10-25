@@ -46,14 +46,19 @@ Thanks for your interest in `calibre-onedrive-sync`!
 
 ## Hard product constraints
 
-- **No cloud API and no OAuth.** The plugin only reads and writes the local
-  folder maintained by the OneDrive desktop client. Do not add Microsoft Graph
-  calls or ask users for account credentials/tokens.
-- **Do not sync a library into itself.** The validation in
-  `src/common/paths.py` rejects overlapping source/target folders; keep that
-  guarantee when implementing the sync engine.
+- **No password handling and no cloud SDK.** Authentication uses the OAuth 2.0
+  device-code flow; the plugin stores only a refresh token and keeps the access
+  token in memory. Do not add `requests`, MSAL, or other third-party runtime
+  dependencies.
+- **Keep Graph access folder-scoped.** The app requests `Files.ReadWrite.All` so
+  shared folders work, but the plugin must only modify the selected folder and
+  its export subfolder.
+- **Do not sync a library into itself.** The target must be a dedicated OneDrive
+  folder, never the calibre library folder.
 - **Runtime dependencies are calibre-bundled only.** pytest/ruff live only in
   CI/dev and are never imported by plugin runtime code.
+- **Network code goes through `common.http`.** Use the injectable transport and
+  downloader seams so tests never contact Microsoft.
 
 ## User-facing strings
 

@@ -382,7 +382,33 @@ class QFrame(QWidget):
 
 
 class QLabel(QWidget):
-    pass
+    def __init__(self, text="", parent=None) -> None:
+        if not isinstance(text, str):
+            parent, text = text, ""
+        super().__init__(parent)
+        self._text = text
+
+
+class QSpinBox(QWidget):
+    valueChanged = pyqtSignal(int)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._minimum = 0
+        self._maximum = 99
+        self._value = 0
+
+    def setRange(self, minimum, maximum) -> None:
+        self._minimum, self._maximum = int(minimum), int(maximum)
+
+    def setValue(self, value) -> None:
+        self._value = max(self._minimum, min(self._maximum, int(value)))
+
+    def value(self) -> int:
+        return self._value
+
+    def setSuffix(self, _suffix) -> None:
+        pass
 
 
 class QPushButton(QWidget):
@@ -426,6 +452,10 @@ class QLineEdit(QWidget):
     def setPlaceholderText(self, _text) -> None:
         pass
 
+    def setText(self, text) -> None:
+        self._text = text
+        self.textChanged.emit(str(text))
+
 
 class QComboBox(QWidget):
     currentIndexChanged = pyqtSignal(int)
@@ -441,7 +471,8 @@ class QComboBox(QWidget):
 
     def addItem(self, text, data=None) -> None:
         self._items.append((text, data))
-        self._index = len(self._items) - 1
+        if self._index < 0:
+            self._index = 0
 
     def currentIndex(self) -> int:
         return self._index
@@ -470,7 +501,10 @@ class QComboBox(QWidget):
         return None
 
     def setCurrentIndex(self, index) -> None:
+        changed = self._index != index
         self._index = index
+        if changed:
+            self.currentIndexChanged.emit(index)
 
     def findData(self, data):
         for index, (_text, value) in enumerate(self._items):
@@ -689,6 +723,9 @@ class QTimer:
     def setInterval(self, interval) -> None:
         self._interval = interval
 
+    def setSingleShot(self, _single_shot) -> None:
+        pass
+
     def start(self) -> None:
         self._active = True
 
@@ -723,10 +760,17 @@ class QThread:
     def isInterruptionRequested(self) -> bool:
         return self._interrupted
 
+    @staticmethod
+    def currentThread():
+        return _Any()
+
 
 class QObject:
     def __init__(self, parent=None) -> None:
         self.parent = parent
+
+    def thread(self):
+        return None
 
     def __getattr__(self, name):
         if name.startswith("_"):
@@ -736,6 +780,26 @@ class QObject:
             return _Any()
 
         return _noop
+
+
+class QFileSystemWatcher(QObject):
+    directoryChanged = pyqtSignal(str)
+    fileChanged = pyqtSignal(str)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._paths: set[str] = set()
+
+    def addPath(self, path) -> bool:
+        self._paths.add(str(path))
+        return True
+
+    def removePaths(self, paths) -> None:
+        for path in paths:
+            self._paths.discard(str(path))
+
+    def paths(self):
+        return sorted(self._paths)
 
 
 class QDialog(QWidget):
@@ -868,7 +932,7 @@ class Qt:
     CursorShape = _Enums(PointingHandCursor=1)
     PenCapStyle = _Enums(RoundCap=1)
     TextInteractionFlag = _Enums(TextSelectableByMouse=1)
-    ConnectionType = _Enums(QueuedConnection=1)
+    ConnectionType = _Enums(QueuedConnection=1, BlockingQueuedConnection=2)
     WindowModality = _Enums(ApplicationModal=1)
     WindowType = _Enums(WindowMaximizeButtonHint=1, WindowMinimizeButtonHint=2)
     WindowState = _Enums(WindowMaximized=1)

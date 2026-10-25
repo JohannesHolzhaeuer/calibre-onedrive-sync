@@ -1,9 +1,8 @@
-"""Configuration widget for the OneDrive sync.
+"""Configuration dialog for the OneDrive sync.
 
-The widget is intentionally thin: all validation and path logic lives in
-:mod:`onedrive_sync.common.paths`, which is unit-testable without Qt. The
-OneDrive folder is the *locally synced* folder maintained by the OneDrive
-desktop client; the plugin never talks to the cloud API directly.
+The widget is mostly glue: OAuth/Graph work lives in ``common`` and the folder
+browser in ``gui.folder_picker``. All network calls made from here run in
+worker threads (sign-in dialog / folder picker).
 """
 
 from __future__ import annotations
@@ -13,26 +12,43 @@ from qt.core import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
-    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
-from ..common.config import Settings, load_settings, save_settings
+from ..common.auth import AuthManager
+from ..common.config import (
+    DEFAULT_EXPORT_FORMAT,
+    EXPORT_FORMATS,
+    MAX_SYNC_INTERVAL,
+    MIN_SYNC_INTERVAL,
+    ConfigTokenStore,
+    Settings,
+    clear_refresh_token,
+    get_refresh_token,
+    load_settings,
+    save_settings,
+)
+from ..common.graph import GraphClient
 from ..common.i18n import _
-from ..common.paths import default_onedrive_folder, target_path, validate_settings
+from ..common.models import FolderRef
+from ..common.sync import normalize_export_subfolder
+from .auth_dialog import sign_in
+from .folder_picker import open_folder_picker
 
 
 class ConfigWidget(QWidget):
-    """Preferences widget: pick the library and the OneDrive destination."""
+    """Preferences widget: app ID, sign-in, target folder and sync options."""
 
-    def __init__(self, parent=None, *, default_library_path: str = "") -> None:
+    def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self._default_library_path = default_library_path
+        self._folder: FolderRef | None = None
+        self._account_name = ""
         self._build_ui()
         self.load()
 
@@ -41,48 +57,73 @@ class ConfigWidget(QWidget):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
 
-        layout.addWidget(QLabel(_("Calibre library folder")))
-        library_row = QHBoxLayout()
-        self.library_path = QLineEdit()
-        self.library_path.setPlaceholderText(_("Path to your calibre library"))
-        self.library_path.textChanged.connect(self._update_preview)
-        self.library_browse = QPushButton(_("Browse…"))
-        self.library_browse.clicked.connect(self._browse_library)
-        library_row.addWidget(self.library_path, 1)
-        library_row.addWidget(self.library_browse)
-        layout.addLayout(library_row)
-
-        layout.addWidget(QLabel(_("OneDrive folder")))
-        onedrive_row = QHBoxLayout()
-        self.onedrive_folder = QLineEdit()
-        self.onedrive_folder.setPlaceholderText(_("Path to your local OneDrive folder"))
-        self.onedrive_folder.textChanged.connect(self._update_preview)
-        self.onedrive_browse = QPushButton(_("Browse…"))
-        self.onedrive_browse.clicked.connect(self._browse_onedrive)
-        onedrive_row.addWidget(self.onedrive_folder, 1)
-        onedrive_row.addWidget(self.onedrive_browse)
-        layout.addLayout(onedrive_row)
-
-        layout.addWidget(QLabel(_("Folder inside OneDrive")))
-        self.remote_subfolder = QLineEdit()
-        self.remote_subfolder.setPlaceholderText(_("e.g. calibre-library"))
-        self.remote_subfolder.textChanged.connect(self._update_preview)
-        layout.addWidget(self.remote_subfolder)
-
-        layout.addWidget(QLabel(_("Sync mode")))
-        self.sync_mode = QComboBox()
-        self.sync_mode.addItem(_("Backup — copy new and changed files"), "backup")
-        self.sync_mode.addItem(_("Mirror — make OneDrive match the library"), "mirror")
-        self.sync_mode.currentIndexChanged.connect(self._on_mode_changed)
-        layout.addWidget(self.sync_mode)
-
-        self.delete_removed = QCheckBox(
-            _("Delete files in OneDrive that are gone from the library")
+        layout.addWidget(QLabel(_("Microsoft app (client) ID")))
+        self.client_id = QLineEdit()
+        self.client_id.setPlaceholderText(_("Application (client) ID from Entra ID"))
+        layout.addWidget(self.client_id)
+        help_label = QLabel(
+            _(
+                "Register a public client app in Microsoft Entra ID with delegated "
+                "Microsoft Graph permissions Files.ReadWrite.All and offline_access, "
+                "then paste its Application (client) ID here. See README.md for the steps."
+            )
         )
-        layout.addWidget(self.delete_removed)
+        help_label.setWordWrap(True)
+        layout.addWidget(help_label)
 
-        self.include_metadata_db = QCheckBox(_("Include calibre metadata.db"))
-        layout.addWidget(self.include_metadata_db)
+        auth_row = QHBoxLayout()
+        self.auth_status = QLabel("")
+        self.sign_in_button = QPushButton(_("Sign in…"))
+        self.sign_in_button.clicked.connect(self._on_sign_in)
+        self.sign_out_button = QPushButton(_("Sign out"))
+        self.sign_out_button.clicked.connect(self._on_sign_out)
+        auth_row.addWidget(self.auth_status, 1)
+        auth_row.addWidget(self.sign_in_button)
+        auth_row.addWidget(self.sign_out_button)
+        layout.addLayout(auth_row)
+
+        folder_row = QHBoxLayout()
+        self.folder_label = QLabel("")
+        self.folder_label.setWordWrap(True)
+        self.choose_folder_button = QPushButton(_("Choose folder…"))
+        self.choose_folder_button.clicked.connect(self._on_choose_folder)
+        folder_row.addWidget(self.folder_label, 1)
+        folder_row.addWidget(self.choose_folder_button)
+        layout.addLayout(folder_row)
+
+        layout.addWidget(QLabel(_("Export subfolder")))
+        self.export_subfolder = QLineEdit()
+        self.export_subfolder.setPlaceholderText(_("Calibre Export"))
+        self.export_subfolder.textChanged.connect(self._update_preview)
+        layout.addWidget(self.export_subfolder)
+
+        layout.addWidget(QLabel(_("Export format")))
+        self.export_format = QComboBox()
+        labels = {
+            "epub_or_pdf": _("EPUB, falling back to PDF"),
+            "epub": _("EPUB only"),
+            "pdf": _("PDF only"),
+        }
+        for value in EXPORT_FORMATS:
+            self.export_format.addItem(labels.get(value, value), value)
+        layout.addWidget(self.export_format)
+
+        self.import_enabled = QCheckBox(_("Import new books from OneDrive"))
+        layout.addWidget(self.import_enabled)
+        self.export_enabled = QCheckBox(_("Export books that are not in OneDrive yet"))
+        layout.addWidget(self.export_enabled)
+
+        self.auto_sync = QCheckBox(_("Sync automatically when the library or OneDrive changes"))
+        layout.addWidget(self.auto_sync)
+
+        interval_row = QHBoxLayout()
+        interval_row.addWidget(QLabel(_("Check for changes every")))
+        self.interval = QSpinBox()
+        self.interval.setRange(MIN_SYNC_INTERVAL, MAX_SYNC_INTERVAL)
+        self.interval.setSuffix(_(" min"))
+        interval_row.addWidget(self.interval)
+        interval_row.addStretch(1)
+        layout.addLayout(interval_row)
 
         self.debug = QCheckBox(_("Debug (verbose logging)"))
         layout.addWidget(self.debug)
@@ -98,41 +139,70 @@ class ConfigWidget(QWidget):
     # -- public API ---------------------------------------------------------
 
     def load(self) -> None:
-        """Populate the widget from persisted settings."""
+        """Populate the widget from persisted settings and the token store."""
         settings = load_settings()
-        self.library_path.setText(settings.library_path or self._default_library_path)
-        self.onedrive_folder.setText(settings.onedrive_folder or default_onedrive_folder())
-        self.remote_subfolder.setText(settings.remote_subfolder)
-        index = self.sync_mode.findData(settings.sync_mode)
-        self.sync_mode.setCurrentIndex(index if index >= 0 else 0)
-        self.delete_removed.setChecked(settings.delete_removed)
-        self.include_metadata_db.setChecked(settings.include_metadata_db)
+        self.client_id.setText(settings.client_id)
+        self._account_name = settings.account_name
+        if settings.folder_id:
+            self._folder = FolderRef(
+                drive_id=settings.drive_id,
+                item_id=settings.folder_id,
+                name=settings.folder_name,
+                path=settings.folder_path,
+            )
+        else:
+            self._folder = None
+        index = self.export_format.findData(settings.export_format or DEFAULT_EXPORT_FORMAT)
+        self.export_format.setCurrentIndex(index if index >= 0 else 0)
+        self.export_subfolder.setText(settings.export_subfolder)
+        self.import_enabled.setChecked(settings.import_enabled)
+        self.export_enabled.setChecked(settings.export_enabled)
+        self.auto_sync.setChecked(settings.auto_sync)
+        self.interval.setValue(settings.sync_interval_minutes)
         self.debug.setChecked(settings.debug)
-        self._on_mode_changed()
+        self._refresh_auth_status()
+        self._refresh_folder_label()
         self._update_preview()
         self._show_status("")
 
     def fields(self) -> dict:
         """Collect the current widget values into a settings dict."""
-        mode = self.sync_mode.currentData() or "backup"
+        folder = self._folder
         return {
-            "library_path": self.library_path.text().strip(),
-            "onedrive_folder": self.onedrive_folder.text().strip(),
-            "remote_subfolder": self.remote_subfolder.text().strip(),
-            "sync_mode": mode,
-            # Deletion only makes sense in mirror mode; never persist a stale
-            # checkbox from a previous mirror selection.
-            "delete_removed": mode == "mirror" and self.delete_removed.isChecked(),
-            "include_metadata_db": self.include_metadata_db.isChecked(),
+            "client_id": self.client_id.text().strip(),
+            "account_name": self._account_name,
+            "drive_id": folder.drive_id if folder else "",
+            "folder_id": folder.item_id if folder else "",
+            "folder_path": folder.path if folder else "",
+            "folder_name": folder.name if folder else "",
+            "export_subfolder": normalize_export_subfolder(self.export_subfolder.text()),
+            "export_format": self.export_format.currentData() or DEFAULT_EXPORT_FORMAT,
+            "import_enabled": self.import_enabled.isChecked(),
+            "export_enabled": self.export_enabled.isChecked(),
+            "auto_sync": self.auto_sync.isChecked(),
+            "sync_interval_minutes": self.interval.value(),
             "debug": self.debug.isChecked(),
         }
 
     def validate(self) -> bool:
         """Validate the current fields; show inline errors and return False on failure."""
-        errors = validate_settings(Settings.from_dict(self.fields()))
+        errors: list[str] = []
+        saved = load_settings()
+        client_id = self.client_id.text().strip()
+        if not client_id:
+            errors.append(_("Enter the Microsoft app (client) ID."))
+        if not get_refresh_token():
+            errors.append(_("Sign in to OneDrive."))
+        elif client_id != saved.client_id.strip():
+            errors.append(_("Sign in again after changing the Microsoft app (client) ID."))
+        if self._folder is None or not self._folder.item_id:
+            errors.append(_("Choose the OneDrive folder to sync with."))
+        if not self.import_enabled.isChecked() and not self.export_enabled.isChecked():
+            errors.append(_("Enable importing, exporting, or both."))
+        if not normalize_export_subfolder(self.export_subfolder.text()):
+            errors.append(_("Enter a valid export subfolder."))
         if errors:
-            self.status.setText("\n".join(errors))
-            self.status.setStyleSheet("color: #a00;")
+            self._show_status("\n".join(errors))
             return False
         self._show_status(_("Configuration looks good."), ok=True)
         return True
@@ -143,45 +213,98 @@ class ConfigWidget(QWidget):
 
     # -- signals / slots ----------------------------------------------------
 
-    def _browse_library(self) -> None:
-        path = QFileDialog.getExistingDirectory(
-            self, _("Select calibre library folder"), self.library_path.text()
+    def _on_sign_in(self) -> None:
+        client_id = self.client_id.text().strip()
+        if not client_id:
+            self._show_status(_("Enter the Microsoft app (client) ID first."))
+            return
+        auth = AuthManager(client_id, ConfigTokenStore())
+        try:
+            ok, profile = sign_in(
+                self,
+                auth,
+                profile_loader=lambda: GraphClient(auth).get_me(),
+            )
+        except Exception as exc:  # noqa: BLE001 - auth/network failure
+            self._show_status(_("Sign-in failed: {message}").format(message=exc))
+            return
+        if not ok:
+            self._show_status(_("Sign-in cancelled."))
+            return
+        self._account_name = str(
+            profile.get("displayName") or profile.get("userPrincipalName") or ""
         )
-        if path:
-            self.library_path.setText(path)
+        self._refresh_auth_status()
+        self._show_status(_("Signed in to OneDrive."), ok=True)
 
-    def _browse_onedrive(self) -> None:
-        path = QFileDialog.getExistingDirectory(
-            self, _("Select OneDrive folder"), self.onedrive_folder.text()
-        )
-        if path:
-            self.onedrive_folder.setText(path)
+    def _on_sign_out(self) -> None:
+        clear_refresh_token()
+        self._account_name = ""
+        self._folder = None
+        self._refresh_auth_status()
+        self._refresh_folder_label()
+        self._show_status(_("Signed out."))
 
-    def _on_mode_changed(self, *_args) -> None:
-        self.delete_removed.setEnabled(self.sync_mode.currentData() == "mirror")
+    def _on_choose_folder(self) -> None:
+        client_id = self.client_id.text().strip()
+        if not client_id:
+            self._show_status(_("Enter the Microsoft app (client) ID first."))
+            return
+        if not get_refresh_token():
+            self._show_status(_("Sign in to OneDrive first."))
+            return
+        auth = AuthManager(client_id, ConfigTokenStore())
+        try:
+            folder = open_folder_picker(self, GraphClient(auth), initial=self._folder)
+        except Exception as exc:  # noqa: BLE001 - network/Graph failure
+            self._show_status(_("Could not open the folder picker: {message}").format(message=exc))
+            return
+        if folder is None or not folder.item_id:
+            return
+        self._folder = folder
+        self._refresh_folder_label()
+        self._update_preview()
+        self._show_status(_("Folder selected: {path}").format(path=folder.display()), ok=True)
+
+    def _refresh_auth_status(self) -> None:
+        if get_refresh_token():
+            name = self._account_name or _("OneDrive account")
+            self.auth_status.setText(_("Signed in as {name}").format(name=name))
+            self.sign_out_button.setEnabled(True)
+        else:
+            self.auth_status.setText(_("Not signed in"))
+            self.sign_out_button.setEnabled(False)
+
+    def _refresh_folder_label(self) -> None:
+        if self._folder is None:
+            self.folder_label.setText(_("No OneDrive folder selected"))
+        else:
+            self.folder_label.setText(
+                _("OneDrive folder: {path}").format(path=self._folder.display())
+            )
 
     def _update_preview(self, *_args) -> None:
-        target = target_path(Settings.from_dict(self.fields()))
-        if target:
-            self.preview.setText(_("OneDrive target: {path}").format(path=target))
-        else:
+        if self._folder is None:
             self.preview.setText("")
+            return
+        subfolder = normalize_export_subfolder(self.export_subfolder.text())
+        self.preview.setText(
+            _("New books are uploaded to: {path}").format(
+                path=f"{self._folder.display().rstrip('/')}/{subfolder}"
+            )
+        )
 
     def _show_status(self, message: str, *, ok: bool = False) -> None:
         self.status.setText(message)
-        self.status.setStyleSheet("color: #080;" if ok else "")
+        self.status.setStyleSheet("color: #080;" if ok else "color: #a00;")
 
 
-def open_config(parent=None, *, default_library_path: str = "") -> bool:
-    """Open the configuration dialog and apply on accept.
-
-    Reused by the action menu (``gui.action``) and the *Customize plugin* hook.
-    Returns True when the user accepted (and settings were saved).
-    """
+def open_config(parent=None) -> bool:
+    """Open the configuration dialog and apply on accept."""
     dialog = QDialog(parent)
     dialog.setWindowTitle(_("OneDrive Sync – Configuration"))
     layout = QVBoxLayout(dialog)
-    widget = ConfigWidget(dialog, default_library_path=default_library_path)
+    widget = ConfigWidget(dialog)
     layout.addWidget(widget)
     buttons = QDialogButtonBox(
         QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
