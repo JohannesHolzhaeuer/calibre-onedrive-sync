@@ -205,8 +205,12 @@ class SyncEngine:
                     result.skipped += 1
                     continue
                 if export_folder_id and item.parent_id == export_folder_id:
-                    result.skipped += 1
-                    continue
+                    if not self.settings.export_directly:
+                        result.skipped += 1
+                        continue
+                    if self.state.is_exported_item(item.drive_id or drive_id, item.id):
+                        result.skipped += 1
+                        continue
                 if self.state.is_imported(item.drive_id or drive_id, item.id):
                     result.skipped += 1
                     continue
@@ -259,12 +263,18 @@ class SyncEngine:
     def _ensure_export_folder(self) -> RemoteItem:
         if self._export_folder is not None:
             return self._export_folder
-        name = normalize_export_subfolder(self.settings.export_subfolder)
-        folder = self.graph.ensure_folder(
-            self.settings.drive_id,
-            self.settings.folder_id,
-            name,
-        )
+        if self.settings.export_directly:
+            folder = self.graph.get_item(
+                self.settings.drive_id,
+                self.settings.folder_id,
+            )
+        else:
+            name = normalize_export_subfolder(self.settings.export_subfolder)
+            folder = self.graph.ensure_folder(
+                self.settings.drive_id,
+                self.settings.folder_id,
+                name,
+            )
         self._export_folder = folder
         self.state.set_meta(
             self._export_folder_key(),

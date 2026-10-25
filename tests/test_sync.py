@@ -53,6 +53,7 @@ class FakeGraph:
         self.upload_errors = []
         self.uploaded = []
         self.downloaded = []
+        self.ensure_calls = []
 
     def delta(self, drive_id, folder_id, link):
         self.delta_calls.append((drive_id, folder_id, link))
@@ -67,7 +68,11 @@ class FakeGraph:
     def list_children(self, drive_id, folder_id):
         return list(self.children)
 
+    def get_item(self, drive_id, item_id):
+        return remote(item_id, "Selected", folder=True)
+
     def ensure_folder(self, drive_id, folder_id, name):
+        self.ensure_calls.append((drive_id, folder_id, name))
         if self.ensure_error is not None:
             raise self.ensure_error
         return self.export_folder
@@ -380,6 +385,32 @@ def test_export_folder_failure_is_reported(tmp_path):
     result = engine.run()
     assert result.failed == 1
     assert any("export folder" in error for error in result.errors)
+    state.close()
+
+
+def test_direct_export_uses_selected_folder_and_skips_known_exports(tmp_path):
+    graph = FakeGraph()
+    graph.delta_items = [
+        remote("exported", "Author - Book (1).epub", parent="folder", size=4),
+        remote("new", "New.epub", parent="folder", size=4),
+    ]
+    library = FakeLibrary()
+    settings = Settings(
+        drive_id="drive",
+        folder_id="folder",
+        import_enabled=True,
+        export_enabled=True,
+        export_directly=True,
+    )
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    state.mark_exported(
+        ExportRecord(1, "epub", "drive", "exported", "Author - Book (1).epub", size=4)
+    )
+    result = engine.run()
+    assert result.imported == 1
+    assert result.skipped == 1
+    assert graph.ensure_calls == []
+    assert graph.downloaded[0][1] == "new"
     state.close()
 
 

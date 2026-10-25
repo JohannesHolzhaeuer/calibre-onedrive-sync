@@ -146,8 +146,10 @@ base branch (project) plus coverage of new lines (patch).
 - `AuthManager` refreshes on expiry and retries one Graph request after a 401.
   `ConfigTokenStore` persists the refresh token (keyring if available, otherwise
   calibre JSON config).
-- The folder picker uses `/me/drive` only; shared drives and drive shortcuts are
-  not listed. Keep all later requests scoped to the chosen `drive_id`/`folder_id`.
+- The folder picker uses a lazily loaded tree for `/me/drive` only; shared drives
+  and drive shortcuts are not listed. Keep all later requests scoped to the
+  chosen `drive_id`/`folder_id`. Exports may target the selected folder directly
+  (`export_directly`) or a subfolder.
 - Import state stores `(drive_id, item_id)` so remote files are never imported
   twice. Export state stores `(book_id, format)` plus the remote item id so
   updates replace the same file. Delta links are stored per drive/folder.

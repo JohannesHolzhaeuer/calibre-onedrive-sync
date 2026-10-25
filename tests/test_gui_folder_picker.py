@@ -19,13 +19,14 @@ class FakeGraph:
         self.drives = [DriveInfo("drive", "OneDrive", owner="Alice")]
         self.fail_drives = False
         self.fail_folders = False
-        root_children = [
-            RemoteItem("folder", "Books", "drive", is_folder=True),
-            RemoteItem("file", "file.epub", "drive"),
-        ]
         self.children = {
-            (None, "drive"): root_children,
-            ("root", "drive"): root_children,
+            ("root", "drive"): [
+                RemoteItem("folder", "Books", "drive", is_folder=True),
+                RemoteItem("file", "file.epub", "drive"),
+            ],
+            ("folder", "drive"): [
+                RemoteItem("nested", "Nested", "drive", is_folder=True),
+            ],
         }
 
     def list_drives(self):
@@ -77,61 +78,73 @@ def test_load_folders_worker():
     assert failed == ["no root"]
 
 
-def test_dialog_navigation(monkeypatch):
+def test_tree_loads_root_and_expands_folders():
     dialog = FolderPickerDialog(FakeGraph())
     dialog.start()
     dialog._thread.run()
     dialog._thread.run()
 
-    assert dialog.drive_combo.count() == 1
-    assert dialog.path_label.text() == "/"
-    assert dialog.folder_combo.count() == 1
-    assert dialog._current_item == "root"
+    assert dialog.tree.topLevelItemCount() == 1
+    root = dialog.tree.topLevelItem(0)
+    assert root.text(0) == "OneDrive"
+    assert root.childCount() == 1
+    assert root.child(0).text(0) == "Books"
 
-    dialog.folder_combo.setCurrentIndex(0)
-    dialog._open_selected()
-    assert dialog._current_path == "/Books"
-    assert dialog._current_item == "folder"
-    assert dialog._stack[0][0] == "drive"
-
+    books = root.child(0)
+    dialog.tree.expandItem(books)
     dialog._thread.run()
-    assert dialog.status.text() == ""
+    assert books.childCount() == 1
+    assert books.child(0).text(0) == "Nested"
 
-    dialog._up()
-    dialog._thread.run()
-    assert dialog._current_item == "root"
-    assert dialog._stack == []
 
-    dialog.folder_combo.setCurrentIndex(0)
-    dialog._open_selected()
+def test_select_existing_folder():
+    dialog = FolderPickerDialog(FakeGraph())
+    dialog.start()
     dialog._thread.run()
+    dialog._thread.run()
+
+    root = dialog.tree.topLevelItem(0)
+    books = root.child(0)
+    dialog.tree.setCurrentItem(books)
     dialog._select_current()
     assert dialog.selected == FolderRef("drive", "folder", "Books", "/Books")
     assert dialog._result == QDialog.DialogCode.Accepted
 
 
-def test_dialog_with_initial_folder_and_errors():
+def test_select_button_and_initial_folder():
     initial = FolderRef("drive", "folder", "Books", "/Books")
     dialog = FolderPickerDialog(FakeGraph(), initial=initial)
     dialog.start()
     dialog._thread.run()
-    assert dialog._current_drive == "drive"
+    dialog._thread.run()
+    assert dialog._drive.id == "drive"
+    assert dialog.select_button.isEnabled() is True
 
-    dialog._on_error("boom")
-    assert "boom" in dialog.status.text()
+    root = dialog.tree.topLevelItem(0)
+    assert dialog.select_button.isEnabled() is True
 
-    dialog._stack = []
-    dialog._up()
-    dialog._open_selected()
+    dialog.tree.setCurrentItem(root.child(0))
+    assert dialog._current_folder() == FolderRef("drive", "folder", "Books", "/Books")
+    assert dialog.select_button.isEnabled() is True
 
 
-def test_dialog_without_drives():
+def test_dialog_without_drive():
     graph = FakeGraph()
     graph.drives = []
     dialog = FolderPickerDialog(graph)
     dialog.start()
     dialog._thread.run()
-    assert "No OneDrive drives" in dialog.status.text()
+    assert "not available" in dialog.status.text()
+
+
+def test_dialog_load_failure():
+    graph = FakeGraph()
+    graph.fail_folders = True
+    dialog = FolderPickerDialog(graph)
+    dialog.start()
+    dialog._thread.run()
+    dialog._thread.run()
+    assert "no root" in dialog.status.text()
 
 
 def test_dialog_reject():

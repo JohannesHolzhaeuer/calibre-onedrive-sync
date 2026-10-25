@@ -14,9 +14,9 @@ browser.
 - **Imports** book files that appear in the selected OneDrive folder into the
   current calibre library. Files are tracked by drive/item id, so a book is
   imported only once.
-- **Exports** calibre books as **EPUB** (preferred) or **PDF** into a subfolder
-  of the selected OneDrive folder. Re-exporting updates the same remote file
-  instead of creating duplicates.
+- **Exports** calibre books as **EPUB** (preferred) or **PDF** into the selected
+  OneDrive folder or an optional subfolder. Re-exporting updates the same remote
+  file instead of creating duplicates.
 - Detects remote changes with **Graph delta queries** and local changes through
   calibre's database listener plus a debounced timer.
 - Runs long operations in **calibre threaded jobs**; the GUI stays responsive.
@@ -70,10 +70,12 @@ toolbar menu's *Open configuration…*:
 1. Paste the **Application (client) ID**.
 2. Click **Sign in…**. A browser page opens; enter the short code shown in the
    dialog. The dialog closes automatically when sign-in succeeds.
-3. Click **Choose folder…** and select a folder in your own OneDrive. The
+3. Click **Choose folder…** and select an existing folder from the tree. The
    picker uses `/me/drive`; it does not list shared drives.
-4. Choose the **export subfolder** (default `Calibre Export`) and format
-   (**EPUB, falling back to PDF**, **EPUB only**, or **PDF only**).
+4. Choose the export destination and format: leave **Export directly into the
+   selected folder** unchecked to create/use the **export subfolder** (default
+   `Calibre Export`), or check it to export into the selected folder itself.
+   Then choose **EPUB, falling back to PDF**, **EPUB only**, or **PDF only**.
 5. Enable importing and/or exporting and optionally automatic sync. Local
    library changes sync immediately; the interval controls the fallback check
    for remote OneDrive changes.

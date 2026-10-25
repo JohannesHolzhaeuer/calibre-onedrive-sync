@@ -513,6 +513,96 @@ class QComboBox(QWidget):
         return -1
 
 
+class QTreeWidgetItem:
+    def __init__(self, strings=None, parent=None) -> None:
+        self._texts = list(strings or [])
+        self._data: dict = {}
+        self._children: list[QTreeWidgetItem] = []
+        self._parent = None
+        if isinstance(parent, QTreeWidget):
+            parent.addTopLevelItem(self)
+        elif isinstance(parent, QTreeWidgetItem):
+            parent.addChild(self)
+
+    def setText(self, column, text) -> None:
+        while len(self._texts) <= column:
+            self._texts.append("")
+        self._texts[column] = str(text)
+
+    def text(self, column) -> str:
+        return self._texts[column] if 0 <= column < len(self._texts) else ""
+
+    def setData(self, column, role, value) -> None:
+        self._data[(column, role)] = value
+
+    def data(self, column, role):
+        return self._data.get((column, role))
+
+    def addChild(self, child) -> None:
+        child._parent = self
+        self._children.append(child)
+
+    def childCount(self) -> int:
+        return len(self._children)
+
+    def child(self, index):
+        return self._children[index] if 0 <= index < len(self._children) else None
+
+    def takeChild(self, index):
+        if 0 <= index < len(self._children):
+            child = self._children.pop(index)
+            child._parent = None
+            return child
+        return None
+
+    def setExpanded(self, expanded) -> None:
+        self._expanded = bool(expanded)
+
+    def isExpanded(self) -> bool:
+        return bool(getattr(self, "_expanded", False))
+
+
+class QTreeWidget(QWidget):
+    itemExpanded = pyqtSignal(object)
+    currentItemChanged = pyqtSignal(object, object)
+    itemDoubleClicked = pyqtSignal(object, int)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._items: list[QTreeWidgetItem] = []
+        self._current: QTreeWidgetItem | None = None
+        self._headers: list[str] = []
+
+    def setHeaderLabels(self, labels) -> None:
+        self._headers = [str(label) for label in labels]
+
+    def addTopLevelItem(self, item) -> None:
+        self._items.append(item)
+
+    def topLevelItemCount(self) -> int:
+        return len(self._items)
+
+    def topLevelItem(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def clear(self) -> None:
+        self._items.clear()
+        self._current = None
+
+    def currentItem(self):
+        return self._current
+
+    def setCurrentItem(self, item) -> None:
+        previous = self._current
+        self._current = item
+        if previous is not item:
+            self.currentItemChanged.emit(item, previous)
+
+    def expandItem(self, item) -> None:
+        item.setExpanded(True)
+        self.itemExpanded.emit(item)
+
+
 class QAction(QWidget):
     triggered = pyqtSignal(bool)
 

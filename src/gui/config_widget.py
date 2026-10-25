@@ -97,6 +97,12 @@ class ConfigWidget(QWidget):
         self.export_subfolder.textChanged.connect(self._update_preview)
         layout.addWidget(self.export_subfolder)
 
+        self.export_directly = QCheckBox(
+            _("Export directly into the selected folder (no subfolder)")
+        )
+        self.export_directly.toggled.connect(self._on_export_directly_toggled)
+        layout.addWidget(self.export_directly)
+
         layout.addWidget(QLabel(_("Export format")))
         self.export_format = QComboBox()
         labels = {
@@ -155,6 +161,8 @@ class ConfigWidget(QWidget):
         index = self.export_format.findData(settings.export_format or DEFAULT_EXPORT_FORMAT)
         self.export_format.setCurrentIndex(index if index >= 0 else 0)
         self.export_subfolder.setText(settings.export_subfolder)
+        self.export_directly.setChecked(settings.export_directly)
+        self._on_export_directly_toggled(settings.export_directly)
         self.import_enabled.setChecked(settings.import_enabled)
         self.export_enabled.setChecked(settings.export_enabled)
         self.auto_sync.setChecked(settings.auto_sync)
@@ -176,6 +184,7 @@ class ConfigWidget(QWidget):
             "folder_path": folder.path if folder else "",
             "folder_name": folder.name if folder else "",
             "export_subfolder": normalize_export_subfolder(self.export_subfolder.text()),
+            "export_directly": self.export_directly.isChecked(),
             "export_format": self.export_format.currentData() or DEFAULT_EXPORT_FORMAT,
             "import_enabled": self.import_enabled.isChecked(),
             "export_enabled": self.export_enabled.isChecked(),
@@ -283,16 +292,18 @@ class ConfigWidget(QWidget):
                 _("OneDrive folder: {path}").format(path=self._folder.display())
             )
 
+    def _on_export_directly_toggled(self, checked: bool) -> None:
+        self.export_subfolder.setEnabled(not checked)
+        self._update_preview()
+
     def _update_preview(self, *_args) -> None:
         if self._folder is None:
             self.preview.setText("")
             return
-        subfolder = normalize_export_subfolder(self.export_subfolder.text())
-        self.preview.setText(
-            _("New books are uploaded to: {path}").format(
-                path=f"{self._folder.display().rstrip('/')}/{subfolder}"
-            )
-        )
+        path = self._folder.display().rstrip("/")
+        if not self.export_directly.isChecked():
+            path = f"{path}/{normalize_export_subfolder(self.export_subfolder.text())}"
+        self.preview.setText(_("New books are uploaded to: {path}").format(path=path))
 
     def _show_status(self, message: str, *, ok: bool = False) -> None:
         self.status.setText(message)

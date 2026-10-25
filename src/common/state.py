@@ -159,6 +159,13 @@ class StateStore:
             return False
         return record.size == int(size) and abs(record.local_mtime - local_mtime) < 0.001
 
+    def is_exported_item(self, drive_id: str, item_id: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM exported_books WHERE drive_id = ? AND item_id = ?",
+            (drive_id, item_id),
+        ).fetchone()
+        return row is not None
+
     def mark_exported(self, record: ExportRecord) -> None:
         self._conn.execute(
             "INSERT INTO exported_books(book_id, fmt, drive_id, item_id, name, e_tag, size, "

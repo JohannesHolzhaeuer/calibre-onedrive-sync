@@ -42,6 +42,7 @@ class Settings:
     folder_path: str = ""
     folder_name: str = ""
     export_subfolder: str = "Calibre Export"
+    export_directly: bool = False
     export_format: str = DEFAULT_EXPORT_FORMAT
     import_enabled: bool = True
     export_enabled: bool = True
