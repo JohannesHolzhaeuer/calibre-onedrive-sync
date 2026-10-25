@@ -7,7 +7,7 @@ Guidance for AI coding agents (and humans) working in this repository.
 `calibre-onedrive-sync` is a **calibre 9** plugin that syncs a calibre library
 with a folder in OneDrive. It talks to **Microsoft Graph** with OAuth 2.0's
 **device-code flow**. The local OneDrive desktop client is not required; the
-selected folder may be on the user's drive or shared with them.
+selected folder must be in the user's own OneDrive (`/me/drive`).
 
 A calibre zip registers exactly **one** `Plugin` subclass, so the zip declares a
 single **interface action** (`OneDriveSyncAction` in `src/__init__.py`).
@@ -19,8 +19,8 @@ Hard product constraints:
   short-lived access token stays in memory. Never add `requests`, MSAL, or any
   other third-party runtime dependency.
 - **Graph access is folder-scoped by behaviour.** The app requests delegated
-  `Files.ReadWrite.All` (needed for shared folders), but the plugin must only
-  touch the folder the user selected and the export subfolder beneath it.
+  `Files.ReadWrite.All`, but the plugin must only touch the folder the user
+  selected and the export subfolder beneath it.
 - **Runtime dependencies are calibre-bundled only.** `pytest`, `pytest-cov` and
   `ruff` are dev/CI-only and must never be imported by plugin runtime code.
 - **Never sync a library into itself.** The plugin works remotely, but keep the
@@ -146,9 +146,8 @@ base branch (project) plus coverage of new lines (patch).
 - `AuthManager` refreshes on expiry and retries one Graph request after a 401.
   `ConfigTokenStore` persists the refresh token (keyring if available, otherwise
   calibre JSON config).
-- The folder picker uses `/me/drives` plus shortcuts (`remoteItem`) so shared
-  drives/folders can be selected. Keep all later requests scoped to the chosen
-  `drive_id`/`folder_id`.
+- The folder picker uses `/me/drive` only; shared drives and drive shortcuts are
+  not listed. Keep all later requests scoped to the chosen `drive_id`/`folder_id`.
 - Import state stores `(drive_id, item_id)` so remote files are never imported
   twice. Export state stores `(book_id, format)` plus the remote item id so
   updates replace the same file. Delta links are stored per drive/folder.

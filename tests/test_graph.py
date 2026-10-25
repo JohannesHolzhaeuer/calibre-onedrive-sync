@@ -87,10 +87,11 @@ def test_drive_and_item_parsing():
     assert folder.extension == ""
 
 
-def test_get_me_and_list_drives_deduplicates():
+def test_get_me_and_own_drive_only():
+    urls = []
+
     def handler(method, url, _kwargs):
-        if url.endswith("/me/drives"):
-            return {"value": [{"id": "d1", "name": "One"}, {"id": "d2", "name": "Two"}]}
+        urls.append(url)
         if url.endswith("/me/drive"):
             return {"id": "d1", "name": "One"}
         if url.endswith("/me"):
@@ -100,7 +101,8 @@ def test_get_me_and_list_drives_deduplicates():
     graph_client, _auth = client(handler)
     assert graph_client.get_me()["displayName"] == "Alice"
     drives = graph_client.list_drives()
-    assert [drive.id for drive in drives] == ["d1", "d2"]
+    assert [drive.id for drive in drives] == ["d1"]
+    assert not any(url.endswith("/me/drives") for url in urls)
 
 
 def test_list_drives_survives_missing_endpoints():
@@ -120,6 +122,29 @@ def test_list_children_follows_next_link():
     graph_client, _auth = client(handler)
     children = graph_client.list_children("drive", "folder")
     assert [child.id for child in children] == ["a", "b"]
+
+
+def test_list_children_skips_shortcuts_to_other_drives():
+    def handler(method, url, _kwargs):
+        return {
+            "value": [
+                {"id": "a", "name": "a.epub", "file": {}},
+                {
+                    "id": "shortcut",
+                    "name": "Shared",
+                    "remoteItem": {
+                        "id": "remote",
+                        "name": "Shared",
+                        "folder": {},
+                        "parentReference": {"driveId": "other"},
+                    },
+                },
+            ]
+        }
+
+    graph_client, _auth = client(handler)
+    children = graph_client.list_children("drive", "folder")
+    assert [child.id for child in children] == ["a"]
 
 
 def test_get_item_and_root():

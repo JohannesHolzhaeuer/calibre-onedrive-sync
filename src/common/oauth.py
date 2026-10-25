@@ -23,8 +23,8 @@ AUTH_BASE = f"https://login.microsoftonline.com/{TENANT}/oauth2/v2.0"
 DEVICE_CODE_URL = f"{AUTH_BASE}/devicecode"
 TOKEN_URL = f"{AUTH_BASE}/token"
 
-#: ``Files.ReadWrite.All`` is required to write into folders shared by other
-#: users. ``offline_access`` gives us the refresh token.
+#: ``Files.ReadWrite.All`` is required to write into the selected OneDrive
+#: folder. ``offline_access`` gives us the refresh token.
 SCOPES = "offline_access Files.ReadWrite.All User.Read"
 
 
