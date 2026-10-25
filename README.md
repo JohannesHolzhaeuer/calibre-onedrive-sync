@@ -11,9 +11,9 @@ browser.
 
 ## What it does
 
-- **Imports** book files that appear in the selected OneDrive folder (including
-  folders shared with you) into the current calibre library. Files are tracked
-  by drive/item id, so a book is imported only once.
+- **Imports** book files that appear in the selected OneDrive folder into the
+  current calibre library. Files are tracked by drive/item id, so a book is
+  imported only once.
 - **Exports** calibre books as **EPUB** (preferred) or **PDF** into a subfolder
   of the selected OneDrive folder. Re-exporting updates the same remote file
   instead of creating duplicates.
@@ -41,8 +41,8 @@ browser.
    flows** → **Yes**, then save.
 4. Open **API permissions** → **Add a permission** → **Microsoft Graph** →
    **Delegated permissions** and add:
-   - `Files.ReadWrite.All` — read/write the folder you select, including
-     folders shared with you;
+   - `Files.ReadWrite.All` — read/write the folder you select in your
+     OneDrive;
    - `User.Read` — show the signed-in account name;
    - `offline_access` — receive a refresh token so you do not sign in every
      time.
@@ -70,12 +70,13 @@ toolbar menu's *Open configuration…*:
 1. Paste the **Application (client) ID**.
 2. Click **Sign in…**. A browser page opens; enter the short code shown in the
    dialog. The dialog closes automatically when sign-in succeeds.
-3. Click **Choose folder…** and select the OneDrive folder to sync. Shared
-   drives and folder shortcuts appear in the drive list / folder browser.
+3. Click **Choose folder…** and select a folder in your own OneDrive. The
+   picker uses `/me/drive`; it does not list shared drives.
 4. Choose the **export subfolder** (default `Calibre Export`) and format
    (**EPUB, falling back to PDF**, **EPUB only**, or **PDF only**).
-5. Enable importing and/or exporting, optionally automatic sync, and set the
-   timer interval.
+5. Enable importing and/or exporting and optionally automatic sync. Local
+   library changes sync immediately; the interval controls the fallback check
+   for remote OneDrive changes.
 6. Add the **OneDrive Sync** button to a toolbar via
    *Preferences → Toolbars & menus*, then use *Sync now*.
 

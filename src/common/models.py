@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class DriveInfo:
-    """A OneDrive/SharePoint drive returned by ``/me/drives``."""
+    """The signed-in user's OneDrive returned by ``/me/drive``."""
 
     id: str
     name: str
@@ -18,7 +18,7 @@ class DriveInfo:
 
 @dataclass(frozen=True)
 class RemoteItem:
-    """A file or folder in a drive (including shared/remote items)."""
+    """A file or folder in a drive."""
 
     id: str
     name: str
@@ -43,7 +43,7 @@ class RemoteItem:
 
 @dataclass(frozen=True)
 class FolderRef:
-    """A selected OneDrive folder, possibly on a shared drive."""
+    """A selected folder in the user's OneDrive."""
 
     drive_id: str
     item_id: str

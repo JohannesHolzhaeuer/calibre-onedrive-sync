@@ -2,7 +2,7 @@
 
 Supports the pieces the sync needs:
 
-* list drives (own + shared libraries) and folder children,
+* fetch the signed-in user's drive and list folder children,
 * create/find folders,
 * delta queries for event-based change detection,
 * streamed downloads,
@@ -178,26 +178,18 @@ class GraphClient:
         return self.get("/me")
 
     def list_drives(self) -> list[DriveInfo]:
-        """List the user's drive and every drive/folder shared with them."""
-        drives: dict[str, DriveInfo] = {}
-        for path in ("/me/drives", "/me/drive"):
-            try:
-                if path == "/me/drives":
-                    entries = self._paged(path)
-                else:
-                    entries = [self.get(path)]
-            except GraphError:
-                continue
-            for entry in entries:
-                info = drive_from_json(entry)
-                if info.id:
-                    drives.setdefault(info.id, info)
-        return list(drives.values())
+        """Return the signed-in user's own OneDrive only."""
+        try:
+            drive = drive_from_json(self.get("/me/drive"))
+        except GraphError:
+            return []
+        return [drive] if drive.id else []
 
     def list_children(self, drive_id: str, item_id: str | None = None) -> list[RemoteItem]:
         """List direct children of a folder (``None`` means the drive root)."""
         entries = self._paged(_children_url(drive_id, item_id))
-        return [remote_from_json(entry, drive_id) for entry in entries]
+        children = [remote_from_json(entry, drive_id) for entry in entries]
+        return [child for child in children if child.drive_id == drive_id]
 
     def get_item(self, drive_id: str, item_id: str) -> RemoteItem:
         """Fetch one drive item by id."""
@@ -285,7 +277,10 @@ class GraphClient:
         new_delta_link = ""
         while url:
             data = self.get(url)
-            items.extend(remote_from_json(entry, drive_id) for entry in data.get("value") or [])
+            for entry in data.get("value") or []:
+                item = remote_from_json(entry, drive_id)
+                if item.drive_id == drive_id:
+                    items.append(item)
             url = str(data.get("@odata.nextLink") or "")
             if not url:
                 new_delta_link = str(data.get("@odata.deltaLink") or "")

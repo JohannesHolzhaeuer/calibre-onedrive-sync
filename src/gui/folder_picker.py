@@ -1,7 +1,7 @@
-"""OneDrive folder picker (own drives, shared drives and folder shortcuts).
+"""OneDrive folder picker for the signed-in user's own drive.
 
-Loading drives and children happens on short-lived ``QThread`` workers so the
-configuration dialog never blocks on the network.
+Loading the drive and its children happens on short-lived ``QThread`` workers so
+the configuration dialog never blocks on the network.
 """
 
 from __future__ import annotations
