@@ -49,6 +49,7 @@ class ConfigWidget(QWidget):
         super().__init__(parent)
         self._folder: FolderRef | None = None
         self._account_name = ""
+        self._signed_in_client_id = ""
         self._build_ui()
         self.load()
 
@@ -198,11 +199,12 @@ class ConfigWidget(QWidget):
         errors: list[str] = []
         saved = load_settings()
         client_id = self.client_id.text().strip()
+        signed_client_id = self._signed_in_client_id.strip() or saved.client_id.strip()
         if not client_id:
             errors.append(_("Enter the Microsoft app (client) ID."))
         if not get_refresh_token():
             errors.append(_("Sign in to OneDrive."))
-        elif client_id != saved.client_id.strip():
+        elif signed_client_id and client_id.casefold() != signed_client_id.casefold():
             errors.append(_("Sign in again after changing the Microsoft app (client) ID."))
         if self._folder is None or not self._folder.item_id:
             errors.append(_("Choose the OneDrive folder to sync with."))
@@ -240,6 +242,7 @@ class ConfigWidget(QWidget):
         if not ok:
             self._show_status(_("Sign-in cancelled."))
             return
+        self._signed_in_client_id = client_id
         self._account_name = str(
             profile.get("displayName") or profile.get("userPrincipalName") or ""
         )
@@ -248,6 +251,7 @@ class ConfigWidget(QWidget):
 
     def _on_sign_out(self) -> None:
         clear_refresh_token()
+        self._signed_in_client_id = ""
         self._account_name = ""
         self._folder = None
         self._refresh_auth_status()

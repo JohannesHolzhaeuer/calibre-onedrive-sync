@@ -99,6 +99,31 @@ def test_validate_requires_sign_in_after_client_id_change(monkeypatch):
     assert "Sign in again" in widget.status.text()
 
 
+def test_validate_allows_first_sign_in_before_client_id_is_saved(monkeypatch):
+    widget = widget_with(monkeypatch, settings=base_settings(client_id=""))
+    widget.client_id.setText("client")
+    assert widget.validate()
+
+
+def test_validate_compares_client_id_case_insensitively(monkeypatch):
+    widget = widget_with(monkeypatch, settings=base_settings(client_id="CLIENT"))
+    widget.client_id.setText("client")
+    assert widget.validate()
+
+
+def test_validate_detects_client_id_change_after_sign_in(monkeypatch):
+    widget = widget_with(monkeypatch)
+    monkeypatch.setattr(
+        config_widget,
+        "sign_in",
+        lambda _parent, _auth, profile_loader=None: (True, {"displayName": "Alice"}),
+    )
+    widget._on_sign_in()
+    widget.client_id.setText("different-client")
+    assert not widget.validate()
+    assert "Sign in again" in widget.status.text()
+
+
 def test_validate_reports_all_errors(monkeypatch):
     widget = widget_with(
         monkeypatch,
