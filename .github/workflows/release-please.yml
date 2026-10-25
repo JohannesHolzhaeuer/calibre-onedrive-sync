@@ -57,7 +57,9 @@ jobs:
         id: release
         with:
           token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
-          release-type: python
+          # Do not pass release-type here: it makes release-please ignore the
+          # config/manifest files (including the draft setting). The release
+          # type is configured per package in release-please-config.json.
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
