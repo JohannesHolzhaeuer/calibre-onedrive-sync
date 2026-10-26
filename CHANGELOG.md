@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/compare/v0.3.0...v0.4.0) (2026-10-26)
+
+
+### Features
+
+* add tree folder picker and direct export target ([#16](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/16)) ([7e22a2f](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/7e22a2f64bf497757c14c16470be4e1cab01f193))
+* use a shared Entra app by default ([#20](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/20)) ([40b2c41](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/40b2c41c0b2024aedfeb032a6f17894b8dd7028d))
+
+
+### Bug Fixes
+
+* avoid false app id change warning ([#18](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/18)) ([0e6ffd8](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/0e6ffd8e67a30c15107bebe869d423eea94aa81e))
+* enlarge the OneDrive sign-in dialog ([#17](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/17)) ([5148d66](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/5148d6622abf8afbc759acb550345a6dc9ee5e1f))
+* make toolbar icon sync without a menu ([#19](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/19)) ([0219b9a](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/0219b9a809dcf6321a1c8455503a2dfc6d10483b))
+* restrict OneDrive access to /me/drive ([#14](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/14)) ([b4ac898](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/b4ac898200eab3240c1bf3fed30acd92c34d511b))
+
 ## [0.3.0](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/compare/v0.2.0...v0.3.0) (2026-10-25)
 
 
