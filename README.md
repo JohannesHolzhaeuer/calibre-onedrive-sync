@@ -44,6 +44,24 @@ Microsoft Graph does not support limiting OAuth consent to a single OneDrive
 folder. After sign-in the plugin browses `/me/drive`; only the folder you select
 (and its export subfolder, if enabled) is accessed.
 
+### Why the app cannot be created or picked automatically
+
+Two things users often ask for are not possible, which is exactly why a shared
+app is bundled:
+
+- **The plugin cannot register an app for you.** Microsoft Entra ID has no
+  anonymous or dynamic client registration, and creating an app through the
+  Graph API or Azure CLI requires a token with `Application.ReadWrite.*` that
+  already has admin consent. An unauthenticated desktop client cannot bootstrap
+  its own registration.
+- **The app cannot be chosen during sign-in.** The device-code flow sends the
+  `client_id` when it requests a device code, *before* any user signs in, so the
+  app must be known up front.
+
+The shared public app removes per-user app creation for personal accounts. Only
+work/school accounts still need their own registration (plus tenant or admin
+consent for `Files.ReadWrite.All`) - see below.
+
 ## Use your own Entra app (optional)
 
 Only needed if you do not want to use the shared app, or need work/school
