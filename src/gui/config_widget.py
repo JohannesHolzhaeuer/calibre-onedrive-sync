@@ -64,9 +64,9 @@ class ConfigWidget(QWidget):
         layout.addWidget(self.client_id)
         help_label = QLabel(
             _(
-                "Register a public client app in Microsoft Entra ID with delegated "
-                "Microsoft Graph permissions Files.ReadWrite.All and offline_access, "
-                "then paste its Application (client) ID here. See README.md for the steps."
+                "A shared public Entra app is preconfigured. Replace this only if you "
+                "use your own app registration with delegated Files.ReadWrite.All, "
+                "User.Read and offline_access permissions."
             )
         )
         help_label.setWordWrap(True)

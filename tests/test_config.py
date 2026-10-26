@@ -29,7 +29,7 @@ def test_settings_from_dict_defaults_and_clamping():
     assert settings.export_format == config.DEFAULT_EXPORT_FORMAT
     assert settings.import_enabled is False
     assert settings.export_enabled is True
-    assert settings.client_id == ""
+    assert settings.client_id == config.DEFAULT_CLIENT_ID
 
     settings = Settings.from_dict({"sync_interval_minutes": "not-an-int"})
     assert settings.sync_interval_minutes == config.DEFAULT_SYNC_INTERVAL
@@ -39,7 +39,7 @@ def test_settings_from_dict_defaults_and_clamping():
 
 def test_load_and_save_settings_round_trip(prefs_backend):
     defaults = config.load_settings()
-    assert defaults.client_id == ""
+    assert defaults.client_id == config.DEFAULT_CLIENT_ID
     settings = Settings(
         client_id="client",
         drive_id="drive",
@@ -57,6 +57,13 @@ def test_load_and_save_settings_round_trip(prefs_backend):
     config.save_settings(settings)
     loaded = config.load_settings()
     assert loaded == settings
+
+
+def test_load_settings_uses_default_client_id_when_blank(prefs_backend):
+    prefs_backend.set("client_id", "")
+    assert config.load_settings().client_id == config.DEFAULT_CLIENT_ID
+    prefs_backend.set("client_id", "custom")
+    assert config.load_settings().client_id == "custom"
 
 
 def test_is_configured():

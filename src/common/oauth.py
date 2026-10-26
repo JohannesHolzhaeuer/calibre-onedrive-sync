@@ -15,13 +15,24 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import urlencode
 
+from .defaults import DEFAULT_CLIENT_ID
 from .errors import AuthError, NotSignedInError
 from .http import HttpError, Transport, request_json
 
 TENANT = "common"
-AUTH_BASE = f"https://login.microsoftonline.com/{TENANT}/oauth2/v2.0"
-DEVICE_CODE_URL = f"{AUTH_BASE}/devicecode"
-TOKEN_URL = f"{AUTH_BASE}/token"
+PERSONAL_TENANT = "consumers"
+
+
+def tenant_for(client_id: str) -> str:
+    """Return the authority that matches the app registration."""
+    if client_id.strip().casefold() == DEFAULT_CLIENT_ID.casefold():
+        return PERSONAL_TENANT
+    return TENANT
+
+
+def _auth_base(client_id: str) -> str:
+    return f"https://login.microsoftonline.com/{tenant_for(client_id)}/oauth2/v2.0"
+
 
 #: ``Files.ReadWrite.All`` is required to write into the selected OneDrive
 #: folder. ``offline_access`` gives us the refresh token.
@@ -81,7 +92,7 @@ def start_device_code(
         raise AuthError("No Microsoft app (client) ID is configured.")
     try:
         data = _post_form(
-            DEVICE_CODE_URL,
+            f"{_auth_base(client_id)}/devicecode",
             {"client_id": client_id, "scope": scopes},
             transport,
         )
@@ -138,7 +149,7 @@ def poll_device_code(
             raise AuthError("Sign-in cancelled.")
         try:
             data = _post_form(
-                TOKEN_URL,
+                f"{_auth_base(client_id)}/token",
                 {
                     "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
                     "client_id": client_id,
@@ -176,7 +187,7 @@ def refresh_access_token(
         raise NotSignedInError("Sign in to OneDrive first.")
     try:
         data = _post_form(
-            TOKEN_URL,
+            f"{_auth_base(client_id)}/token",
             {
                 "grant_type": "refresh_token",
                 "client_id": client_id,

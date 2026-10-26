@@ -46,6 +46,7 @@ def test_zip_contains_package_modules(build_dir):
         "common/__init__.py",
         "common/auth.py",
         "common/config.py",
+        "common/defaults.py",
         "common/graph.py",
         "common/oauth.py",
         "common/state.py",

@@ -42,6 +42,7 @@ Hard product constraints:
 │   ├── common/                    # calibre-independent, unit-testable logic
 │   │   ├── auth.py                # access-token cache + refresh-token store
 │   │   ├── config.py              # persistent settings + token storage
+│   │   ├── defaults.py            # shared public app ID
 │   │   ├── errors.py              # typed plugin errors
 │   │   ├── graph.py               # Microsoft Graph client (drives, delta, upload/download)
 │   │   ├── http.py                # urllib transport with test seams
@@ -138,9 +139,11 @@ base branch (project) plus coverage of new lines (patch).
 
 ## Authentication and sync design
 
-- The user supplies a Microsoft Entra **Application (client) ID** in the
-  configuration dialog; there is no bundled app registration. The tenant is
-  `common` so personal and work/school accounts both work.
+- A shared public Entra app ID is bundled as `DEFAULT_CLIENT_ID` in
+  `common/defaults.py`; users may override it with their own public client. The
+  shared app is personal-account-only and uses the `consumers` authority;
+  custom app IDs use `common` and must support personal + organizational
+  accounts. Never add a client secret.
 - Scopes: `offline_access Files.ReadWrite.All User.Read`. `offline_access`
   yields the refresh token; the access token is cached in memory only.
 - `AuthManager` refreshes on expiry and retries one Graph request after a 401.
