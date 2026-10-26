@@ -5,9 +5,9 @@ in sync with a folder in **OneDrive**.
 
 The plugin talks to **Microsoft Graph** directly using OAuth 2.0's device-code
 flow. It does not need the OneDrive desktop client and never asks for your
-Microsoft password. You register a small public client app in Microsoft Entra
-ID, paste its Application (client) ID into the plugin, and sign in through your
-browser.
+Microsoft password. The plugin ships with a shared public Entra app, so you can
+sign in without registering your own app. Advanced users can replace the
+prefilled Application (client) ID with their own app registration.
 
 ## What it does
 
@@ -25,12 +25,32 @@ browser.
 ## Requirements
 
 - calibre **9.0** or newer (Qt6 / Python 3).
-- A Microsoft account (personal, work, or school).
-- One Microsoft Entra app registration (free; setup below).
+- A Microsoft account. The shared app supports personal Microsoft accounts;
+  work/school accounts need your own app registration.
+- No Entra app registration is required for personal accounts; a shared public
+  app is preconfigured.
 - For development: Python **3.11+** plus the dev extras
   (`pip install -e ".[dev]"`).
 
-## Set up the Microsoft app
+## Microsoft app
+
+The plugin uses the shared public app ID
+`9f70f5c3-4b51-43d2-b0d4-3f2abad5754f` by default. It is registered for personal
+Microsoft accounts, so every user with a personal account can sign in with it;
+each user consents once and the refresh token stays on their machine. No client
+secret is used.
+
+Microsoft Graph does not support limiting OAuth consent to a single OneDrive
+folder. After sign-in the plugin browses `/me/drive`; only the folder you select
+(and its export subfolder, if enabled) is accessed.
+
+## Use your own Entra app (optional)
+
+Only needed if you do not want to use the shared app, or need work/school
+accounts. Register the app for any Entra tenant plus personal Microsoft accounts
+and allow public client flows; custom app IDs use the `common` authority.
+App registrations and Microsoft Graph API calls are free, but your OneDrive
+storage limits still apply.
 
 1. Open the [Microsoft Entra admin center](https://entra.microsoft.com/) →
    **App registrations** → **New registration**.
@@ -66,7 +86,8 @@ from file*.
 
 Open *Preferences → Plugins → Customize plugin → OneDrive Sync*:
 
-1. Paste the **Application (client) ID**.
+1. The shared **Application (client) ID** is prefilled. Replace it only if you
+   are using your own Entra app.
 2. Click **Sign in…**. A browser page opens; enter the short code shown in the
    dialog. The dialog closes automatically when sign-in succeeds.
 3. Click **Choose folder…** and select an existing folder from the tree. The

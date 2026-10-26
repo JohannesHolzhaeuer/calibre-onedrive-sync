@@ -212,6 +212,28 @@ def test_refresh_access_token_other_error():
         refresh_access_token("client", "refresh", transport=transport)
 
 
+def test_default_app_uses_consumers_tenant():
+    assert oauth.tenant_for(oauth.DEFAULT_CLIENT_ID) == "consumers"
+    assert oauth.tenant_for("custom-client") == "common"
+    transport = QueueTransport(
+        HttpResponse(
+            200,
+            b'{"device_code":"d","user_code":"U","verification_uri":"https://x"}',
+        )
+    )
+    start_device_code(oauth.DEFAULT_CLIENT_ID, transport=transport)
+    assert "/consumers/oauth2/v2.0/devicecode" in transport.calls[0]["url"]
+
+    transport = QueueTransport(token_response())
+    poll_device_code(
+        oauth.DEFAULT_CLIENT_ID,
+        device_code(),
+        transport=transport,
+        clock=lambda: 0,
+    )
+    assert "/consumers/oauth2/v2.0/token" in transport.calls[0]["url"]
+
+
 def test_constants():
     assert "Files.ReadWrite.All" in oauth.SCOPES
     assert oauth.TENANT == "common"

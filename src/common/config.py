@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, fields
 
 from .auth import TokenStore
+from .defaults import DEFAULT_CLIENT_ID
 
 try:
     from calibre.utils.config import JSONConfig
@@ -35,7 +36,7 @@ MAX_SYNC_INTERVAL = 1440
 class Settings:
     """User-visible configuration for the OneDrive sync."""
 
-    client_id: str = ""
+    client_id: str = DEFAULT_CLIENT_ID
     account_name: str = ""
     drive_id: str = ""
     folder_id: str = ""
@@ -96,6 +97,8 @@ def load_settings() -> Settings:
     if prefs is None:
         return Settings.from_dict(DEFAULTS)
     data = {key: prefs.get(key, default) for key, default in DEFAULTS.items()}
+    if not str(data.get("client_id") or "").strip():
+        data["client_id"] = DEFAULT_CLIENT_ID
     return Settings.from_dict(data)
 
 
