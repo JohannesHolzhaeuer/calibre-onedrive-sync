@@ -75,13 +75,23 @@ def make_action(monkeypatch):
     return action
 
 
-def test_genesis_builds_icon_and_menu(monkeypatch):
+def test_genesis_builds_icon_without_menu(monkeypatch):
     action = make_action(monkeypatch)
     assert action.qaction.icon == "icon"
-    assert [text for text, _slot in action.menu.actions()] == [
-        "Sync now",
-        "Open configuration…",
-    ]
+    assert action.qaction.menu() is None
+    assert action.sync_now in action.qaction.triggered._slots
+
+
+def test_toolbar_click_triggers_sync(monkeypatch):
+    called = []
+    monkeypatch.setattr(
+        OneDriveSyncInterfaceAction,
+        "sync_now",
+        lambda _self, *args: called.append(args),
+    )
+    action = make_action(monkeypatch)
+    action.qaction.triggered.emit(False)
+    assert called == [(False,)]
 
 
 def test_shutting_down_stops_scheduler_and_closes_state(monkeypatch):

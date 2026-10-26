@@ -35,11 +35,24 @@ class FakeInterfaceActionBase(FakeCustomizeBase):
     actual_plugin = ""
 
 
+class FakeSignal:
+    def __init__(self) -> None:
+        self._slots: list = []
+
+    def connect(self, slot, *_args) -> None:
+        self._slots.append(slot)
+
+    def emit(self, *args) -> None:
+        for slot in list(self._slots):
+            slot(*args)
+
+
 class FakeQAction:
-    """Minimal ``QAction`` stand-in (icon + menu)."""
+    """Minimal ``QAction`` stand-in (icon + triggered signal)."""
 
     def __init__(self) -> None:
         self.icon = None
+        self.triggered = FakeSignal()
         self._menu = None
 
     def setIcon(self, icon) -> None:
