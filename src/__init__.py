@@ -5,8 +5,8 @@ registers **exactly one** :class:`Plugin` subclass per zip, so this plugin ships
 a single **interface action**:
 
 * ``OneDriveSyncAction`` — an :class:`InterfaceActionBase` that adds a
-  "OneDrive Sync" toolbar button with a menu (*Sync now*, *Open configuration*).
-  Its ``do_user_config`` opens the configuration dialog used by
+  "OneDrive Sync" toolbar button; clicking it syncs immediately. Its
+  ``do_user_config`` opens the configuration dialog used by
   *Preferences → Plugins → Customize plugin*.
 
 Keep top-level imports minimal (only ``calibre.customize``). Do NOT import PyQt

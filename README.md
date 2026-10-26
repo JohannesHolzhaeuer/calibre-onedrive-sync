@@ -64,8 +64,7 @@ from file*.
 
 ## Configure
 
-Open *Preferences → Plugins → Customize plugin → OneDrive Sync*, or use the
-toolbar menu's *Open configuration…*:
+Open *Preferences → Plugins → Customize plugin → OneDrive Sync*:
 
 1. Paste the **Application (client) ID**.
 2. Click **Sign in…**. A browser page opens; enter the short code shown in the
@@ -80,7 +79,8 @@ toolbar menu's *Open configuration…*:
    library changes sync immediately; the interval controls the fallback check
    for remote OneDrive changes.
 6. Add the **OneDrive Sync** button to a toolbar via
-   *Preferences → Toolbars & menus*, then use *Sync now*.
+   *Preferences → Toolbars & menus*. Clicking the button syncs immediately; if the plugin is not configured
+   yet, the first click opens this dialog.
 
 The configuration is stored in calibre's settings. The refresh token is stored
 in the platform keyring when available and otherwise in calibre's JSON config;

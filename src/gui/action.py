@@ -1,14 +1,13 @@
-"""OneDrive Sync InterfaceAction: toolbar button with a small menu.
+"""OneDrive Sync InterfaceAction: click the toolbar button to sync.
 
-The action exposes *Sync now* and *Open configuration…*. Syncs run in calibre
-threaded jobs; the scheduler reacts to calibre DB changes and a timer, so the
-plugin also works without a local OneDrive client.
+Syncs run in calibre threaded jobs; the scheduler reacts to calibre DB changes
+and a timer, so the plugin also works without a local OneDrive client.
 """
 
 from __future__ import annotations
 
 from calibre.gui2.actions import InterfaceAction
-from qt.core import QMenu, QMessageBox, pyqtSignal
+from qt.core import QMessageBox, pyqtSignal
 
 from ..common.auth import AuthManager
 from ..common.config import ConfigTokenStore, get_refresh_token, is_configured, load_settings
@@ -40,7 +39,7 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
     _job_done = pyqtSignal(object)
 
     def genesis(self):
-        """Set up the action icon, menu, scheduler and job callback."""
+        """Set up the action icon, scheduler and job callback."""
         self._job = None
         self._state: StateStore | None = None
         self.qaction.setIcon(
@@ -48,10 +47,7 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
                 "resources/images/onedrive.png", "onedrive_sync"
             )
         )
-        self.menu = QMenu(self.gui)
-        self.menu.addAction(_("Sync now"), self.sync_now)
-        self.menu.addAction(_("Open configuration…"), self.open_config)
-        self.qaction.setMenu(self.menu)
+        self.qaction.triggered.connect(self.sync_now)
 
         self._scheduler = SyncScheduler(self.gui)
         self._scheduler.sync_requested.connect(self.sync_now)
@@ -74,7 +70,7 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         if self._job is None:
             self._close_state()
 
-    # -- menu actions -------------------------------------------------------
+    # -- actions ------------------------------------------------------------
 
     def open_config(self) -> bool:
         """Open the configuration dialog and re-arm the scheduler on accept."""
