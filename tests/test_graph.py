@@ -428,6 +428,17 @@ def test_a_path_without_a_leading_slash_becomes_absolute():
     assert "/root:/Books/index.json:" in graph_client._transport.calls[0]["url"]
 
 
+def test_a_path_with_spaces_is_percent_encoded():
+    graph_client, _auth = client(lambda *_args: {"id": "i", "name": "book.epub", "file": {}})
+    graph_client.get_item_by_path("d", "/data/ebook/A Author - Buch (German Edition).epub")
+    url = graph_client._transport.calls[0]["url"]
+
+    assert " " not in url
+    assert "%20" in url
+    assert "/root:/data/ebook/" in url
+    assert url.endswith(".epub:")
+
+
 def test_download_reports_a_server_error(tmp_path):
     def downloader(_url, _path, **_kwargs):
         raise HttpError(500, b"server exploded")
