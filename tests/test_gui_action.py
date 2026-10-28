@@ -1168,3 +1168,249 @@ def test_clear_backup_does_not_chain_after_an_error(monkeypatch):
     assert started == []
     assert action._state is None
     assert warnings
+
+
+# -- defensive branches ------------------------------------------------------
+
+
+def test_a_late_index_check_callback_is_ignored(monkeypatch):
+    action = review_action(monkeypatch)
+    action._job = "live"
+    warnings = []
+    monkeypatch.setattr(action_mod.QMessageBox, "warning", lambda *args: warnings.append(args))
+
+    action._on_index_checked(index_job(None, failed=True, error=GraphError(404, "gone")))
+
+    assert warnings == []
+    assert action._job == "live"
+    assert action._state is not None
+
+
+def test_remember_folder_survives_an_unwritable_settings_file(monkeypatch):
+    action = make_action(monkeypatch)
+    settings = Settings(client_id="c")
+
+    def fail(_settings):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(action_mod, "save_settings", fail)
+
+    action._remember_folder(settings, FolderRef("d", "f", "Folder"))
+
+    # The session keeps the new folder even though it could not be persisted.
+    assert (settings.drive_id, settings.folder_id) == ("d", "f")
+    assert (settings.folder_name, settings.folder_path) == ("Folder", "")
+
+
+def test_settings_for_reloads_after_the_config_dialog(monkeypatch):
+    action = make_action(monkeypatch)
+    configured = Settings(client_id="c", drive_id="d", folder_id="f")
+    calls = []
+
+    def load():
+        calls.append(1)
+        return Settings() if len(calls) == 1 else configured
+
+    monkeypatch.setattr(action_mod, "load_settings", load)
+    monkeypatch.setattr(action_mod, "is_configured", lambda settings: bool(settings.folder_id))
+    monkeypatch.setattr(action_mod, "get_refresh_token", lambda: "refresh")
+    monkeypatch.setattr(action, "open_config", lambda: True)
+
+    assert action._settings_for() is configured
+    assert len(calls) == 2
+
+
+def test_settings_for_stays_unusable_after_the_config_dialog(monkeypatch):
+    action = make_action(monkeypatch)
+    monkeypatch.setattr(action_mod, "load_settings", lambda: Settings())
+    monkeypatch.setattr(action_mod, "is_configured", lambda _settings: False)
+    monkeypatch.setattr(action_mod, "get_refresh_token", lambda: "refresh")
+    monkeypatch.setattr(action, "open_config", lambda: True)
+
+    assert action._settings_for() is None
+
+
+def test_prepare_engine_wires_the_sync_engine(monkeypatch, tmp_path):
+    action = make_action(monkeypatch)
+    logged = []
+    state_path = str(tmp_path / "state.sqlite")
+    monkeypatch.setattr(action_mod, "configure_logging", lambda debug: logged.append(debug))
+    monkeypatch.setattr(action_mod, "default_state_path", lambda: state_path)
+    settings = Settings(client_id="client", debug=True)
+
+    assert action._prepare_engine(settings) is True
+
+    assert logged == [True]
+    assert action._library is not None
+    assert action._state.path == state_path
+    assert action._engine.settings is settings
+    assert action._engine.state is action._state
+    assert action._engine.library is action._library
+    assert action._engine.graph.auth.client_id == "client"
+    assert callable(action._engine.add_book)
+    assert callable(action._engine.link_book)
+    assert action._engine.metadata_reader is action_mod.read_metadata
+    action._close_state()
+
+
+def test_prepare_engine_closes_a_half_built_state(monkeypatch):
+    action = make_action(monkeypatch)
+    closed = []
+
+    class BrokenState:
+        def close(self):
+            closed.append(1)
+            raise RuntimeError("already closed")
+
+    monkeypatch.setattr(action_mod, "StateStore", lambda _path: BrokenState())
+    monkeypatch.setattr(action_mod, "default_state_path", lambda: "state.sqlite")
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("engine broke")
+
+    monkeypatch.setattr(action_mod, "SyncEngine", fail)
+    warnings = []
+    monkeypatch.setattr(action_mod.QMessageBox, "warning", lambda *args: warnings.append(args))
+
+    assert action._prepare_engine(Settings(client_id="c")) is False
+
+    assert closed == [1]
+    assert warnings and "engine broke" in warnings[0][2]
+    assert action._state is None
+    assert action._engine is None
+
+
+def test_scan_cancelled_while_the_window_is_open(monkeypatch):
+    action = review_action(monkeypatch)
+    dialog = ReviewDialog()
+    dialog.start_scanning()
+    action._review_dialog = dialog
+    job = killed_job()
+    action._job = job
+    warnings = []
+    monkeypatch.setattr(action_mod.QMessageBox, "warning", lambda *args: warnings.append(args))
+
+    action._on_scan_done(job)
+
+    assert warnings == []
+    assert dialog.status.text() == "OneDrive matching cancelled."
+    assert action.gui.status_bar.messages[-1] == "OneDrive matching cancelled."
+
+
+def test_abort_job_ignores_a_worker_that_already_finished(monkeypatch):
+    action = make_action(monkeypatch)
+
+    class Abort:
+        def set(self):
+            raise RuntimeError("no worker")
+
+    # ``set`` raising is swallowed: the job is already gone.
+    action._abort_job(types.SimpleNamespace(abort=Abort()))
+
+
+def test_unknown_task_names_use_the_generic_labels(monkeypatch):
+    action = make_action(monkeypatch)
+
+    assert action._task_description("mystery") == "OneDrive Sync"
+    assert action._task_status("mystery") == action_mod._("Working on OneDrive…")
+
+
+def test_on_task_done_truncates_a_long_error_list(monkeypatch):
+    action = task_action(monkeypatch)
+    warnings = []
+    monkeypatch.setattr(action_mod.QMessageBox, "warning", lambda *args: warnings.append(args))
+
+    run_task(action, result=SyncResult(failed=12, errors=[f"error {index}" for index in range(12)]))
+
+    assert warnings
+    assert "…" in warnings[-1][2]
+    assert "error 9" in warnings[-1][2]
+    assert "error 11" not in warnings[-1][2]
+
+
+def test_stale_link_sweep_skips_a_book_the_library_cannot_write(monkeypatch):
+    action = review_action(monkeypatch)
+
+    class Broken:
+        def set_identifier(self, *_args):
+            raise RuntimeError("db closed")
+
+    action._library = Broken()
+    action._engine.stale_links = [
+        BookLink(book_id=7, drive_id="drive", item_id="gone", name="Old.epub"),
+        BookLink(book_id=8, drive_id="drive", item_id="gone-2", name="Older.epub"),
+    ]
+    statuses = []
+    monkeypatch.setattr(action, "_show_status", lambda message: statuses.append(message))
+
+    action._forget_stale_links()
+
+    assert action._engine.stale_links == []
+    assert statuses == []  # nothing was cleared, so nothing is reported
+
+
+def test_persist_plan_links_ignores_a_library_that_cannot_write(monkeypatch):
+    action = review_action(monkeypatch)
+
+    class Broken:
+        def set_identifier(self, *_args):
+            raise RuntimeError("db closed")
+
+    action._library = Broken()
+    plan = sample_plan()
+
+    action._persist_plan_links(plan)
+
+    matched = [entry for entry in plan.entries if entry.status == "matched"]
+    assert len(action._state.links) == len(matched)
+
+
+def test_job_cancelled_handles_an_unreadable_abort_flag(monkeypatch):
+    action = make_action(monkeypatch)
+
+    class Abort:
+        def is_set(self):
+            raise RuntimeError("job object gone")
+
+    assert action._job_cancelled(types.SimpleNamespace(killed=False, abort=Abort())) is False
+
+
+def test_job_is_running_follows_the_worker_state(monkeypatch):
+    action = make_action(monkeypatch)
+
+    assert action._job_is_running(types.SimpleNamespace(worker_active=True)) is True
+    assert (
+        action._job_is_running(
+            types.SimpleNamespace(worker_active=False, killed=True, abort=threading.Event())
+        )
+        is False
+    )
+    assert (
+        action._job_is_running(
+            types.SimpleNamespace(
+                worker_active=False, killed=False, duration=1.0, abort=threading.Event()
+            )
+        )
+        is False
+    )
+
+
+def test_the_next_click_releases_a_dead_job_reference(monkeypatch):
+    action = make_action(monkeypatch)
+    action._state = FakeState()
+    action._job = types.SimpleNamespace(
+        killed=False,
+        failed=False,
+        result=None,
+        duration=0.5,
+        abort=threading.Event(),
+        worker_active=False,
+    )
+    called = []
+    monkeypatch.setattr(action, "review_now", lambda: called.append(1))
+
+    action.sync_now()
+
+    assert called == [1]
+    assert action._job is None
+    assert action._state is None

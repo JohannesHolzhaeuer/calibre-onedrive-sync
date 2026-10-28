@@ -1,12 +1,15 @@
 # Codecov configuration.
 #
 # The CI workflow uploads coverage.xml from the test job. These statuses turn
-# coverage into a merge gate (once the Codecov check is required in the
-# branch-protection rules):
+# coverage into a merge gate:
 #
 #   * project: the total coverage may not fall below the base branch value
 #     (`target: auto`, `threshold: 0%`).
 #   * patch:   every pull request must cover its own new/changed lines.
+#
+# The `main-protection` ruleset requires `codecov/patch`, so a PR whose own
+# lines are not fully covered cannot merge. `codecov/project` is not required:
+# Codecov only posts it when it has a base report to compare against.
 #
 # `fail_under = 90` in pyproject.toml is the independent local/CI floor.
 coverage:

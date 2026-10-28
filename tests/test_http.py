@@ -234,6 +234,49 @@ def test_a_303_redirect_becomes_a_get():
     assert redirect.get_header("Authorization") == "token"
 
 
+def test_a_redirect_another_handler_must_handle_is_handed_back(monkeypatch):
+    # ``HTTPRedirectHandler`` documents that ``redirect_request`` may return
+    # ``None`` when the redirect is left to a different handler; the plugin's
+    # handler must pass that through untouched instead of crashing on it.
+    monkeypatch.setattr(
+        urllib.request.HTTPRedirectHandler,
+        "redirect_request",
+        lambda _self, *_args, **_kwargs: None,
+    )
+    assert _redirect("https://a1b2.files.1drv.com/y4mX/book.epub") is None
+
+
+def test_a_redirect_without_a_token_is_returned_unchanged():
+    request = urllib.request.Request("https://graph.microsoft.com/v1.0/x")
+    redirect = http._KeepMicrosoftAuth().redirect_request(
+        request,
+        None,
+        302,
+        "Found",
+        _location("https://a1b2.files.1drv.com/y4mX/book.epub"),
+        "https://a1b2.files.1drv.com/y4mX/book.epub",
+    )
+    assert redirect is not None
+    assert redirect.get_header("Authorization") is None
+
+
+def test_an_unredirected_token_is_restored_on_a_microsoft_redirect():
+    # ``Request`` keeps unredirected headers (added by hand or by an opener) in
+    # a separate dict that a redirect does not copy, so the token still has to
+    # be put back for the storage host.
+    request = urllib.request.Request("https://graph.microsoft.com/v1.0/content")
+    request.add_unredirected_header("Authorization", "token")
+    redirect = http._KeepMicrosoftAuth().redirect_request(
+        request,
+        None,
+        302,
+        "Found",
+        _location("https://a1b2.files.1drv.com/y4mX/book.epub"),
+        "https://a1b2.files.1drv.com/y4mX/book.epub",
+    )
+    assert redirect.get_header("Authorization") == "token"
+
+
 def test_the_allow_list_covers_microsoft_hosts():
     assert is_trusted_redirect("https://graph.microsoft.com/v1.0/me")
     assert is_trusted_redirect("https://a1b2.files.1drv.com/x")

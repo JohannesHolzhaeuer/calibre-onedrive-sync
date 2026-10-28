@@ -317,6 +317,35 @@ def test_clear_identifier_removes_the_key_from_every_book():
     assert library.identifiers(3) == {}
 
 
+def test_library_identifiers_ignores_an_unusable_value():
+    gui = FakeGui()
+    gui.current_db.new_api.fields[("identifiers", 1)] = "broken"
+    library = CalibreLibrary(gui)
+
+    assert library.identifiers(1) == {}
+
+
+def test_set_identifier_without_a_writable_api_only_logs():
+    gui = FakeGui()
+    api = gui.current_db.new_api
+    api.set_identifiers = None
+    api.set_field = None
+    library = CalibreLibrary(gui)
+
+    # No calibre write path on ``current_db`` either: the link stays in state.
+    library.set_identifier(2, "onedrive", "item-2")
+
+    assert api.identifiers_calls == []
+    assert api.field_calls == []
+
+
+def test_read_metadata_without_a_format_returns_none(tmp_path):
+    path = tmp_path / "book"
+    path.write_bytes(b"book")
+
+    assert read_metadata(str(path), "") is None
+
+
 def test_clear_identifier_is_a_no_op_without_matches():
     gui = FakeGui()
     api = gui.current_db.new_api

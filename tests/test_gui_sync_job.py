@@ -7,6 +7,7 @@ import types
 import pytest
 
 from onedrive_sync.common.models import SyncResult
+from onedrive_sync.gui import sync_job
 from onedrive_sync.gui.sync_job import (
     ApplyJob,
     IndexJob,
@@ -33,6 +34,18 @@ def test_main_thread_book_adder_propagates_errors():
     adder = MainThreadBookAdder(fail)
     with pytest.raises(ValueError, match="bad book"):
         adder("x")
+
+
+def test_main_thread_call_runs_inline_on_its_own_thread(monkeypatch):
+    """A call already made from the owning (GUI) thread skips the signal."""
+    thread = object()
+    seen = []
+    adder = MainThreadBookAdder(lambda path: seen.append(path) or len(path))
+    adder.thread = lambda: thread
+    monkeypatch.setattr(sync_job, "QThread", types.SimpleNamespace(currentThread=lambda: thread))
+
+    assert adder("abcd") == 4
+    assert seen == ["abcd"]
 
 
 def test_main_thread_book_linker_returns_result_and_propagates_errors():
@@ -331,6 +344,26 @@ def test_task_job_reports_engine_errors():
     assert job.failed
     assert str(job.exception) == "quota"
     assert done == [job]
+
+
+def test_task_job_forwards_engine_errors_to_the_log():
+    engine = FakeReviewEngine()
+    errors = ["a.epub: quota exceeded", "b.pdf: locked"]
+    engine.upload_all = lambda: SyncResult(exported=1, errors=list(errors))
+    logged = []
+    job = TaskJob(engine, "upload_all", lambda _job: None, description="Upload")
+
+    # calibre hands the worker a ``log`` callable; the fake job's ``start_work``
+    # always passes a no-op, so drive the worker entry point with a recording log.
+    result = job.func(
+        *job.args,
+        notifications=types.SimpleNamespace(put=lambda item: None),
+        abort=job.abort,
+        log=logged.append,
+    )
+
+    assert result.errors == errors
+    assert logged[-2:] == errors
 
 
 def test_start_task_job_enqueues():
