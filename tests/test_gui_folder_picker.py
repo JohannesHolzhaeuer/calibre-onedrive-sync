@@ -118,11 +118,14 @@ def test_select_button_and_initial_folder():
     dialog._thread.run()
     dialog._thread.run()
     assert dialog._drive.id == "drive"
+
+    # The configured folder is offered as a one-click entry and preselected.
+    current = dialog.tree.topLevelItem(0)
+    assert "Current folder: /Books" in current.text(0)
+    assert dialog._current_folder() == initial
     assert dialog.select_button.isEnabled() is True
 
-    root = dialog.tree.topLevelItem(0)
-    assert dialog.select_button.isEnabled() is True
-
+    root = dialog.tree.topLevelItem(1)
     dialog.tree.setCurrentItem(root.child(0))
     assert dialog._current_folder() == FolderRef("drive", "folder", "Books", "/Books")
     assert dialog.select_button.isEnabled() is True

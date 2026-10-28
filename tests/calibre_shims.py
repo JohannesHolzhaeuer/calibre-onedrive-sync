@@ -101,11 +101,13 @@ class FakeThreadedJob:
         self.exception = None
         self.failed = False
         self.killed = False
+        self.abort = threading.Event()
+        self.duration = None
 
     def start_work(self) -> None:
         self.kwargs.update(
             notifications=_FakeNotifications(),
-            abort=threading.Event(),
+            abort=self.abort,
             log=lambda *_args: None,
         )
         try:
@@ -113,11 +115,16 @@ class FakeThreadedJob:
         except Exception as exc:  # noqa: BLE001 - mirrors calibre
             self.exception = exc
             self.failed = True
+        self.duration = 0.0
         self.callback(self)
 
     def kill(self) -> None:
+        # Mirrors calibre: sets the abort event, marks the job failed (without
+        # an exception) and never calls the completion callback.
+        self.abort.set()
         self.killed = True
         self.failed = True
+        self.duration = 0.0001
 
 
 class _FakeNotifications:

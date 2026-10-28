@@ -49,6 +49,7 @@ def test_zip_contains_package_modules(build_dir):
         "common/defaults.py",
         "common/graph.py",
         "common/oauth.py",
+        "common/reconcile.py",
         "common/state.py",
         "common/sync.py",
         "common/version.py",
@@ -57,7 +58,7 @@ def test_zip_contains_package_modules(build_dir):
         "gui/config_widget.py",
         "gui/folder_picker.py",
         "gui/library.py",
-        "gui/scheduler.py",
+        "gui/review_dialog.py",
         "gui/sync_job.py",
         "resources/images/onedrive.png",
     ):

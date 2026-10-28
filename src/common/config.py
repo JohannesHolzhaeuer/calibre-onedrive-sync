@@ -42,6 +42,8 @@ class Settings:
     folder_id: str = ""
     folder_path: str = ""
     folder_name: str = ""
+    #: Legacy configuration fields, kept so old settings still load. The plugin
+    #: now uploads directly into the selected folder and never syncs by itself.
     export_subfolder: str = "Calibre Export"
     export_directly: bool = False
     export_format: str = DEFAULT_EXPORT_FORMAT

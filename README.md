@@ -11,16 +11,44 @@ prefilled Application (client) ID with their own app registration.
 
 ## What it does
 
-- **Imports** book files that appear in the selected OneDrive folder into the
-  current calibre library. Files are tracked by drive/item id, so a book is
-  imported only once.
-- **Exports** calibre books as **EPUB** (preferred) or **PDF** into the selected
-  OneDrive folder or an optional subfolder. Re-exporting updates the same remote
-  file instead of creating duplicates.
-- Detects remote changes with **Graph delta queries** and local changes through
-  calibre's database listener plus a debounced timer.
-- Runs long operations in **calibre threaded jobs**; the GUI stays responsive.
-- Does **not** delete local or remote books, and never mirrors deletions.
+Everything is **manual**. The plugin never syncs at startup, on a timer or when
+the library changes: nothing leaves your machine and nothing is imported until
+you click the toolbar button. It only ever looks at the **direct children of the
+selected folder** — subfolders are never read.
+
+- **Folder per click**: the toolbar button opens the OneDrive folder picker,
+  prefilled with the folder you used last time. Confirm it and the plugin checks
+  whether that folder already carries a calibre index.
+- **Index gate**: if the folder has a usable `calibre-onedrive-index.json`, the
+  matching window opens. If it does not, the plugin offers to clear the folder
+  and upload the whole library together with a fresh index.
+- **Imports** book files that appear in the selected folder into the current
+  calibre library — only when you ask for it (single rows or **Download all** in
+  the review window). Files are tracked by drive/item id, so a book is imported
+  only once.
+- **Exports** calibre books as **EPUB** (preferred) or **PDF** directly into the
+  selected folder. Re-exporting updates the same remote file instead of creating
+  duplicates.
+- **Matches before syncing**: the review window fills in while OneDrive is
+  scanned: local books first, then their OneDrive counterparts, then
+  metadata-based refinements. It lists what would be uploaded or downloaded and
+  which extra copies can be removed. Nothing is transferred until you confirm.
+- **Writes a calibre index** (`calibre-onedrive-index.json`) into the selected
+  folder on every upload. The index maps each stored file to its calibre book id,
+  so a later scan matches by item id instead of guessing from the filename.
+- **Bulk actions** in the review window: **Upload all** uploads every book and
+  writes the index, **Download all** imports everything without matching (clean
+  duplicates up afterwards with calibre's *Find Duplicates* plugin), and
+  **Clear backup** deletes every file in the selected folder after a
+  confirmation so you can start over.
+- **Remembers the OneDrive link** for each book in calibre's identifiers field,
+  so later scans recognise the same file even after it was renamed.
+- Runs long operations in **calibre threaded jobs**; the GUI stays responsive and
+  a running scan/upload/download can be cancelled from calibre's job panel.
+- Never deletes local books and never mirrors local deletions. Deleting a
+  duplicate OneDrive copy is possible from the review window and moves that file
+  to the OneDrive recycle bin; **Clear backup** deletes the whole remote folder
+  only after an explicit confirmation.
 
 ## Requirements
 
@@ -42,7 +70,7 @@ secret is used.
 
 Microsoft Graph does not support limiting OAuth consent to a single OneDrive
 folder. After sign-in the plugin browses `/me/drive`; only the folder you select
-(and its export subfolder, if enabled) is accessed.
+is accessed (and only its direct children).
 
 ### Why the app cannot be created or picked automatically
 
@@ -109,32 +137,61 @@ Open *Preferences → Plugins → Customize plugin → OneDrive Sync*:
 2. Click **Sign in…**. A browser page opens; enter the short code shown in the
    dialog. The dialog closes automatically when sign-in succeeds.
 3. Click **Choose folder…** and select an existing folder from the tree. The
-   picker uses `/me/drive`; it does not list shared drives.
-4. Choose the export destination and format: leave **Export directly into the
-   selected folder** unchecked to create/use the **export subfolder** (default
-   `Calibre Export`), or check it to export into the selected folder itself.
-   Then choose **EPUB, falling back to PDF**, **EPUB only**, or **PDF only**.
-5. Enable importing and/or exporting and optionally automatic sync. Local
-   library changes sync immediately; the interval controls the fallback check
-   for remote OneDrive changes.
-6. Add the **OneDrive Sync** button to a toolbar via
-   *Preferences → Toolbars & menus*. Clicking the button syncs immediately; if the plugin is not configured
-   yet, the first click opens this dialog.
+   picker uses `/me/drive`; it does not list shared drives. This folder is only
+   the default — every toolbar click lets you confirm or change it.
+4. Choose the export format: **EPUB, falling back to PDF**, **EPUB only**, or
+   **PDF only**. Books are always uploaded directly into the selected folder.
+5. Add the **OneDrive Sync** button to a toolbar via *Preferences → Toolbars &
+   menus*. If the plugin is not configured yet, the first click opens this
+   dialog.
 
-The configuration is stored in calibre's settings. The refresh token is stored
-in the platform keyring when available and otherwise in calibre's JSON config;
-the short-lived access token is never written to disk.
+There is no automatic sync and no interval to configure. The configuration is
+stored in calibre's settings. The refresh token is stored in the platform
+keyring when available and otherwise in calibre's JSON config; the short-lived
+access token is never written to disk.
 
 ## How syncing behaves
 
-- **Import**: walks the selected folder (delta query first, recursive listing
-  as fallback), downloads files with supported book extensions, and adds them
-  through calibre's normal add-books API. The export subfolder is skipped.
-- **Export**: uploads one EPUB/PDF per book to the export subfolder. The remote
-  item id is remembered so edits replace the same file. If a file with the
-  expected name and size already exists, it is adopted instead of duplicated.
-- **No deletes**: removing a book locally or remotely does not delete the other
-  copy.
+- **One click, one decision**: clicking the toolbar button opens the OneDrive
+  folder picker with the current folder preselected. After you confirm it, the
+  plugin checks for `calibre-onedrive-index.json` in that folder.
+  - **Index found** → the matching window opens immediately and fills in while
+    the scan runs (local books first, then the OneDrive files, then
+    metadata-based refinements).
+  - **No index** → you are asked whether to clear the folder (everything goes to
+    the OneDrive recycle bin) and upload your whole library with a fresh index.
+    Only a confirmed *Yes* starts that chain; any error or cancellation stops it.
+  Closing the window stops the scan.
+- **Flat folder only**: only the direct children of the selected folder are
+  listed. Nothing inside a subfolder is read, matched, downloaded or deleted.
+- **Bulk review actions**: **Upload all** uploads every book that is not in
+  OneDrive yet (existing files are linked, not uploaded again) and rewrites the
+  index. **Download all** imports every ebook file it has not imported before,
+  deliberately allowing duplicates — run calibre's *Find Duplicates* plugin
+  afterwards to clean them up. **Clear backup** asks once, then deletes every
+  item directly inside the selected OneDrive folder, forgets the sync state for
+  that drive, and clears the `onedrive` identifier from your books, so the next
+  **Upload all** starts from an empty folder.
+- **Matching**: a saved OneDrive link wins, then the `calibre-onedrive-index.json`
+  written by the plugin (item id first, then a unique filename), then the
+  calibre book id in the export filename, then title and author. For remote
+  EPUB/PDF files whose names are not conclusive it temporarily downloads the
+  file to read its embedded metadata (never importing the book just for this),
+  and caches the result until the file changes.
+- **Import**: lists the direct children of the selected folder, downloads files
+  with supported book extensions, and adds them through calibre's normal
+  add-books API. The source item is immediately stored as the book's OneDrive
+  link, so a later upload does not add it back as a duplicate.
+- **Export**: uploads one EPUB/PDF per book into the selected folder. The remote
+  item id is remembered so edits replace the same file. If a file for the same
+  book already exists under another name or format, it is linked and adopted
+  instead of duplicated. After a successful pass the index is rewritten.
+- **Links**: each linked book gets an `onedrive` identifier containing the
+  OneDrive web URL (or the item id when Graph supplies no URL). The SQLite state
+  stores the same information so a reinstall can rebuild it on the next scan.
+- **No local deletes**: removing a book locally or remotely does not delete the
+  other copy. Only an explicitly ticked duplicate in the review window is
+  removed, and it goes to the OneDrive recycle bin.
 - **No self-sync**: the plugin works through Graph and never copies a calibre
   library into itself.
 - **Conflicts** are handled with OneDrive's rename conflict behaviour; the
@@ -146,8 +203,8 @@ the short-lived access token is never written to disk.
 | --- | --- |
 | `src/` | All plugin source. The **contents** of this folder become the zip. |
 | `src/__init__.py` | Declares the `OneDriveSyncAction` plugin class (`InterfaceActionBase`). Must sit at the zip root. |
-| `src/common/` | Calibre-independent logic: settings, OAuth, Graph client, sync state, sync engine. |
-| `src/gui/` | Interface action, configuration/sign-in/folder dialogs, jobs and scheduler. |
+| `src/common/` | Calibre-independent logic: settings, OAuth, Graph client, sync state, matching, sync engine. |
+| `src/gui/` | Interface action, configuration/sign-in/folder dialogs, matching window and jobs. |
 | `src/resources/` | Icons. |
 | `tests/` | pytest suite with fake Graph/HTTP/Qt/calibre seams (no network). |
 | `dist/` | Build output — `dist/onedrive-sync.zip` (gitignored). |
