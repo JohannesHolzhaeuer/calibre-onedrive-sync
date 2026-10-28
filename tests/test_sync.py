@@ -12,7 +12,12 @@ from onedrive_sync.common.config import Settings
 from onedrive_sync.common.errors import CancelledError, GraphError
 from onedrive_sync.common.index import INDEX_FILENAME, BookIndex, IndexEntry
 from onedrive_sync.common.models import BookLink, ExportRecord, RemoteItem
-from onedrive_sync.common.reconcile import LocalBook, build_reconcile_plan
+from onedrive_sync.common.reconcile import (
+    LocalBook,
+    ReconcileEntry,
+    ReconcilePlan,
+    build_reconcile_plan,
+)
 from onedrive_sync.common.state import StateStore
 from onedrive_sync.common.sync import (
     SyncEngine,
@@ -102,6 +107,17 @@ class FakeGraph:
         if self.delete_error is not None:
             raise self.delete_error
         self.deleted.append((drive_id, item_id))
+
+
+class FailingIndexGraph(FakeGraph):
+    """A folder whose books upload fine but whose index file cannot be written."""
+
+    def upload_file(self, drive_id, parent_id, name, path, *, item_id="", conflict="rename"):
+        if name == INDEX_FILENAME:
+            raise OSError("disk full")
+        return super().upload_file(
+            drive_id, parent_id, name, path, item_id=item_id, conflict=conflict
+        )
 
 
 class FakeLibrary:
@@ -1053,4 +1069,449 @@ def test_scan_aborts_before_reading_the_library(tmp_path):
     with pytest.raises(CancelledError):
         engine.scan()
     assert graph.list_calls == []
+    state.close()
+
+
+# -- bulk actions: cancellation and per-row guards ---------------------------
+
+
+def test_upload_all_stops_between_uploads_when_cancelled(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    _local_book(library, 1, "One", "Jane Doe")
+    _local_book(library, 2, "Two", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        should_abort=lambda: len(graph.uploaded) >= 1,
+    )
+
+    result = engine.upload_all()
+
+    assert result.cancelled
+    assert result.exported == 1
+    assert "Sync cancelled." in result.errors
+    # The index is not rewritten once the run was cancelled.
+    assert [call[2] for call in graph.uploaded] == ["Jane Doe - One (1).epub"]
+    state.close()
+
+
+def test_upload_all_reports_a_failing_upload(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    _local_book(library, 1, "One", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    graph.upload_error = OSError("disk full")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    result = engine.upload_all()
+
+    assert result.exported == 0
+    assert result.failed == 1
+    assert len(result.errors) == 1
+    assert "disk full" in result.errors[0]
+    # The failed row is named so the user knows which book broke.
+    assert "One — Jane Doe (#1)" in result.errors[0]
+    state.close()
+
+
+def test_download_all_stops_between_downloads_when_cancelled(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote("a", "a.epub"), remote("b", "b.epub")]
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        add_book=lambda _path: 10,
+        should_abort=lambda: len(graph.downloaded) >= 1,
+    )
+
+    result = engine.download_all()
+
+    assert result.cancelled
+    assert result.imported == 1
+    assert "Sync cancelled." in result.errors
+    # Cancelled runs do not touch the index.
+    assert INDEX_FILENAME not in graph.uploaded_bytes
+    state.close()
+
+
+def test_download_all_ignores_a_failing_index_write(tmp_path):
+    graph = FailingIndexGraph()
+    graph.recursive = [remote("a", "a.epub")]
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings, add_book=lambda _path: 10)
+
+    result = engine.download_all()
+
+    # The imported books stay imported; only the index is lost.
+    assert result.imported == 1
+    assert result.failed == 0
+    assert result.errors == []
+    assert INDEX_FILENAME not in graph.uploaded_bytes
+    state.close()
+
+
+def test_clear_backup_stops_before_listing_when_cancelled(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote("a", "a.epub")]
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings, should_abort=lambda: True)
+
+    result = engine.clear_backup()
+
+    assert result.cancelled
+    assert "Sync cancelled." in result.errors
+    assert graph.deleted == []
+    assert graph.list_calls == []
+    state.close()
+
+
+def test_apply_plan_ignores_a_failing_index_write(tmp_path):
+    graph = FailingIndexGraph()
+    library = FakeLibrary()
+    _local_book(library, 1, "Upload Me", "Author")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    plan = build_reconcile_plan(
+        [LocalBook(book_id=1, title="Upload Me", authors="Author", formats=("epub",))],
+        [],
+    )
+    selected = [entry for entry in plan.entries if entry.selectable]
+
+    result = engine.apply_plan(plan, selected)
+
+    assert result.exported == 1
+    assert result.failed == 0
+    assert result.errors == []
+    state.close()
+
+
+# -- local book helpers ------------------------------------------------------
+
+
+def test_local_book_adds_an_extra_format_on_request(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe", fmt="epub")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    book = engine._local_book(1, extra_format="PDF")
+
+    assert book.formats == ("epub", "pdf")
+    # An already known format is not added twice.
+    assert engine._local_book(1, extra_format="epub").formats == ("epub",)
+    state.close()
+
+
+def test_scan_survives_failing_identifier_lookups(tmp_path):
+    class BrokenIdentifiers(FakeLibrary):
+        def identifiers(self, book_id):
+            raise RuntimeError("metadata locked")
+
+    graph = FakeGraph()
+    graph.recursive = [remote("named", "Jane Doe - The Book.epub")]
+    library = BrokenIdentifiers()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    plan = engine.scan()
+
+    # Broken book metadata must never stop a scan.
+    assert plan.local_books[0].identifiers == {}
+    assert plan.entries[0].status == "matched"
+    state.close()
+
+
+def test_local_book_falls_back_to_epub_when_the_preferred_format_is_absent(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe", fmt="epub")
+    settings = Settings(drive_id="drive", folder_id="folder", export_format="pdf")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    book = engine._local_book(1)
+
+    # The pdf preference has no file, so the epub one supplies size and mtime.
+    assert book.formats == ("epub",)
+    assert (book.size, book.mtime) == (4, 10.0)
+    state.close()
+
+
+# -- metadata probing --------------------------------------------------------
+
+
+def test_scan_skips_the_metadata_probe_when_no_ebook_is_listed(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote("notes", "notes.txt")]
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    seen = []
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        metadata_reader=lambda path, fmt: seen.append(path) or ("The Book", "Jane Doe"),
+    )
+
+    plan = engine.scan()
+
+    assert plan.local_books
+    assert seen == []
+    assert graph.downloaded == []
+    state.close()
+
+
+def test_scan_keeps_files_whose_metadata_could_not_be_read(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote("scan", "scan001.epub")]
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        metadata_reader=lambda _path, _fmt: None,
+    )
+
+    plan = engine.scan()
+
+    assert plan.entry("remote:drive:scan").status == "download"
+    assert state.get_remote_metadata("drive", "scan") is None
+    state.close()
+
+
+# -- row-level guards --------------------------------------------------------
+
+
+def test_apply_plan_reports_an_upload_row_without_a_local_book(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    entry = ReconcileEntry(key="upload:none", status="upload")
+
+    result = engine.apply_plan(ReconcilePlan(entries=[entry]), [entry])
+
+    assert result.failed == 1
+    assert "No local book for this row." in result.errors[0]
+    assert graph.uploaded == []
+    state.close()
+
+
+def test_apply_plan_skips_an_upload_row_without_a_syncable_format(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    entry = ReconcileEntry(
+        key="upload:1",
+        status="upload",
+        local=LocalBook(book_id=1, title="Only MOBI", authors="Author", formats=("mobi",)),
+    )
+
+    result = engine.apply_plan(ReconcilePlan(entries=[entry]), [entry])
+
+    assert result.skipped == 1
+    assert result.exported == 0
+    assert result.failed == 0
+    assert graph.uploaded == []
+    state.close()
+
+
+def test_apply_plan_skips_an_upload_row_whose_file_is_missing(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    # The book claims an epub but calibre has no file for it.
+    library.books.append(1)
+    library.titles_map[1] = "The Book"
+    library.authors_map[1] = "Jane Doe"
+    library.formats_map[1] = ["epub"]
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    plan = build_reconcile_plan(
+        [LocalBook(book_id=1, title="The Book", authors="Jane Doe", formats=("epub",))],
+        [],
+    )
+    selected = [entry for entry in plan.entries if entry.selectable]
+
+    result = engine.apply_plan(plan, selected)
+
+    assert result.skipped == 1
+    assert result.failed == 0
+    assert graph.uploaded == []
+    state.close()
+
+
+def test_apply_plan_reuses_the_item_id_of_the_previous_export(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    _local_book(library, 2, "Two", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    state.mark_exported(
+        ExportRecord(
+            book_id=2,
+            fmt="epub",
+            drive_id="drive",
+            item_id="exported",
+            name="Jane Doe - Two (2).epub",
+        )
+    )
+    plan = build_reconcile_plan(
+        [LocalBook(book_id=2, title="Two", authors="Jane Doe", formats=("epub",))],
+        [],
+    )
+    selected = [entry for entry in plan.entries if entry.selectable]
+
+    result = engine.apply_plan(plan, selected)
+
+    assert result.exported == 1
+    # The unchanged name means the existing item is replaced in place.
+    assert graph.uploaded[0][4] == "exported"
+    state.close()
+
+
+def test_apply_plan_reuses_the_item_id_of_the_linked_file(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    _local_book(library, 2, "Two", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    state.link_book(BookLink(book_id=2, drive_id="drive", item_id="linked", name="Old.epub"))
+    plan = build_reconcile_plan(
+        [LocalBook(book_id=2, title="Two", authors="Jane Doe", formats=("epub",))],
+        [],
+    )
+    selected = [entry for entry in plan.entries if entry.selectable]
+
+    result = engine.apply_plan(plan, selected)
+
+    assert result.exported == 1
+    # Without an export record the stored link still points at the same format.
+    assert graph.uploaded[0][4] == "linked"
+    state.close()
+
+
+def test_apply_plan_reports_a_download_row_without_a_remote_file(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    entry = ReconcileEntry(key="remote:drive:none", status="download")
+
+    result = engine.apply_plan(ReconcilePlan(entries=[entry]), [entry])
+
+    assert result.failed == 1
+    assert "No OneDrive file for this row." in result.errors[0]
+    assert result.imported == 0
+    state.close()
+
+
+def test_apply_plan_reports_a_download_row_without_a_book_id(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote("d", "Unknown - Download.epub")]
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings, add_book=lambda _path: None)
+    entry = ReconcileEntry(
+        key="remote:drive:d",
+        status="download",
+        remote=remote("d", "Unknown - Download.epub"),
+    )
+
+    result = engine.apply_plan(ReconcilePlan(entries=[entry]), [entry])
+
+    assert result.failed == 1
+    assert "calibre did not return a book id." in result.errors[0]
+    assert result.imported == 0
+    state.close()
+
+
+def test_apply_plan_reports_a_delete_row_without_a_remote_file(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    entry = ReconcileEntry(key="remote:drive:none", status="duplicate")
+
+    result = engine.apply_plan(ReconcilePlan(entries=[entry]), [entry])
+
+    assert result.failed == 1
+    assert "No OneDrive file for this row." in result.errors[0]
+    assert graph.deleted == []
+    state.close()
+
+
+def test_apply_plan_removes_the_link_of_a_deleted_duplicate(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    # An older book of another library points at the copy that gets deleted.
+    state.link_book(BookLink(book_id=9, drive_id="drive", item_id="extra", name="Copy.epub"))
+    plan = build_reconcile_plan(
+        [LocalBook(book_id=1, title="The Book", authors="Jane Doe", formats=("epub",))],
+        [
+            remote("m", "Jane Doe - The Book.epub"),
+            remote("extra", "Jane Doe - The Book copy.epub"),
+        ],
+    )
+    selected = [entry for entry in plan.entries if entry.status == "duplicate"]
+
+    result = engine.apply_plan(plan, selected)
+
+    assert result.deleted == 1
+    assert graph.deleted == [("drive", "extra")]
+    assert state.get_link(9) is None
+    state.close()
+
+
+# -- calibre index -----------------------------------------------------------
+
+
+def test_index_check_raises_for_a_failing_index_download(tmp_path):
+    graph = FakeGraph()
+    write_index(graph, (1, "file", "a.epub"))
+    graph.download_error = GraphError(500, "server error")
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    with pytest.raises(GraphError) as caught:
+        engine.index_available()
+
+    # Only a missing index is normal; a broken drive must surface.
+    assert caught.value.status == 500
+    state.close()
+
+
+def test_index_write_skips_links_without_an_item_id_or_name(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote("a", "a.epub")]
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings, add_book=lambda _path: 10)
+    state.link_book(BookLink(book_id=1, drive_id="drive", item_id="", name=""))
+
+    result = engine.download_all()
+
+    assert result.imported == 1
+    payload = json.loads(graph.uploaded_bytes[INDEX_FILENAME])
+    assert [book["book_id"] for book in payload["books"]] == [10]
     state.close()

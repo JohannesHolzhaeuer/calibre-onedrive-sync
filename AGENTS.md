@@ -134,8 +134,14 @@ headless calibre/Qt stand-ins so the GUI modules can be imported and tested
 without calibre installed. CI additionally uploads `coverage.xml` to Codecov.
 
 Coverage is a merge gate: `[tool.coverage.report].fail_under = 90` makes
-`pytest --cov` fail below 90 %, and `codecov.yml` requires no decrease vs. the
-base branch (project) plus coverage of new lines (patch).
+`pytest --cov` fail below 90 %, `codecov.yml` requires no decrease vs. the
+base branch (project) plus coverage of new lines (patch), and the
+`main-protection` ruleset makes **`codecov/patch` a required status check** — a
+PR that does not cover its own changed lines at 100 % cannot merge
+(`codecov/project` is not required, Codecov only posts it when it has a base
+report to compare against). To check patch coverage locally, run
+`pytest --cov --cov-report=xml` and look up the added lines of the diff in
+`coverage.xml`; `0` hits means the line needs a test.
 
 ## Commit & release conventions
 

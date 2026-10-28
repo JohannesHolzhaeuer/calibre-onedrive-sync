@@ -75,6 +75,36 @@ def test_match_score_does_not_guess_short_titles_without_author():
     assert match_score(remote("a", "Stephen King - It.epub"), king) >= 95
 
 
+def test_match_score_accepts_a_near_identical_title():
+    local = book(1, "The Quick Brown Fox", "Jane Doe")
+    # One substituted letter is still >= 0.94 similar, so the title alone is
+    # strong evidence once the author appears in the file name.
+    assert match_score(remote("a", "Jane Doe - The Quick Brown Fax.epub"), local) == 88
+    # Without author evidence the same similarity only scores 72.
+    assert match_score(remote("a", "The Quick Brown Fax.epub"), local) == 72
+
+
+def test_match_score_accepts_a_slightly_off_title_from_the_author():
+    local = book(3, "A Tale of Two Cities", "Charles Dickens")
+    assert match_score(remote("a", "Charles Dickens - A Tale of Two Citys.epub"), local) == 84
+
+
+def test_match_score_ignores_a_file_name_without_a_title():
+    # ``(9).epub`` carries a calibre id but no author/title part at all.
+    local = book(1, "The Book", "Jane Doe")
+    assert match_score(remote("a", "(9).epub"), local) == 0
+
+
+def test_match_score_ignores_a_book_without_a_title():
+    assert match_score(remote("a", "Anything.epub"), book(1, "")) == 0
+
+
+def test_preferred_format_prefers_epub_then_pdf():
+    assert book(1, "Book", formats=("epub", "pdf")).preferred_format == "epub"
+    assert book(1, "Book", formats=("mobi", "pdf")).preferred_format == "pdf"
+    assert book(1, "Book", formats=("mobi",)).preferred_format is None
+
+
 def test_pick_format():
     assert pick_format(["EPUB", "pdf"], "epub_or_pdf") == "epub"
     assert pick_format(["PDF"], "epub_or_pdf") == "pdf"
@@ -106,6 +136,15 @@ def test_plan_assigns_upload_download_and_local_only():
         "download": 1,
     }
     assert "1 already matched" in plan.summary()
+
+
+def test_plan_matches_a_non_epub_pdf_file():
+    # A MOBI-only book and file are still a match, the format only affects the
+    # ranking when several files could belong to the same book.
+    locals_ = [book(1, "The Book", "Jane Doe", formats=("mobi",))]
+    plan = build_reconcile_plan(locals_, [remote("m", "Jane Doe - The Book.mobi")])
+    assert [entry.status for entry in plan.entries] == ["matched"]
+    assert plan.entries[0].remote.id == "m"
 
 
 def test_plan_marks_second_copy_as_duplicate():

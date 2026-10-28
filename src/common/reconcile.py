@@ -485,18 +485,16 @@ def build_reconcile_plan(
 
         if not proposals:
             break
-        progressed = False
         for book_id, options in proposals.items():
-            if book_id in assigned_books:
-                continue
+            # Every key of ``proposals`` was still unassigned when it was built
+            # (see the filter above) and is visited once, so each round assigns
+            # at least one book: the empty-proposals check above is the only
+            # exit this loop needs.
             options.sort(key=lambda option: (-option[0], option[1], option[2].name.casefold()))
             _score, _rank, remote = options[0]
             book_to_remote[book_id] = remote
             remote_to_book[remote.id] = book_id
             assigned_books.add(book_id)
-            progressed = True
-        if not progressed:
-            break
 
     entries: list[ReconcileEntry] = []
     used_remote_ids: set[str] = set()

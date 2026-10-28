@@ -274,6 +274,13 @@ def test_refresh_access_token_retries_a_transport_error():
     assert sleeps == [1.0]
 
 
+def test_refresh_access_token_gives_up_after_transport_errors():
+    transport = QueueTransport(*[HttpError(0, "connection reset")] * oauth.DEVICE_CODE_ATTEMPTS)
+    with pytest.raises(AuthError, match="Could not reach"):
+        refresh_access_token("client", "refresh", transport=transport, sleep=lambda _seconds: None)
+    assert len(transport.calls) == oauth.DEVICE_CODE_ATTEMPTS
+
+
 def test_default_app_uses_consumers_tenant():
     assert oauth.tenant_for(oauth.DEFAULT_CLIENT_ID) == "consumers"
     assert oauth.tenant_for("custom-client") == "common"
