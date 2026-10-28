@@ -180,7 +180,10 @@ base branch (project) plus coverage of new lines (patch).
   index is handled by the action's clear+upload offer, never by guessing.
 - Import state stores `(drive_id, item_id)` so remote files are never imported
   twice. Export state stores `(book_id, format)` plus the remote item id so
-  updates replace the same file.
+  updates replace the same file. A scan prunes the links of the selected drive
+  whose item id is missing from the listing (and the action clears the calibre
+  `onedrive` identifier of those books), so deleting files in OneDrive by hand is
+  picked up on the next scan instead of leaving the books marked as linked.
 - Book links are stored twice: in the `book_links` SQLite table for fast
   matching and in the calibre `identifiers` field under the `onedrive` key (web
   URL, or item id when Graph has no URL). The review window persists matches for

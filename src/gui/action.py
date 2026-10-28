@@ -437,6 +437,7 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
             return
         self._scan_plan = plan
         self._persist_plan_links(plan)
+        self._forget_stale_links()
         self._show_status(plan.summary())
         if dialog is not None:
             dialog.finish_scan(plan)
@@ -607,6 +608,34 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
             log.warning("Could not clear the OneDrive identifiers", exc_info=True)
             return
         log.info("Cleared %s OneDrive identifier(s)", cleared)
+
+    def _forget_stale_links(self) -> None:
+        """Drop the calibre identifier of links the scan found to be broken.
+
+        The scan has already removed the state rows; the identifier is the copy
+        shown in the calibre book list, so it has to follow, and the book is
+        offered for upload again.
+        """
+        stale = getattr(self._engine, "stale_links", ())
+        if not stale:
+            return
+        self._engine.stale_links = []
+        library = self._library
+        if library is None:
+            return
+        cleared = 0
+        for link in stale:
+            try:
+                library.set_identifier(link.book_id, ONEDRIVE_IDENTIFIER, "")
+            except Exception:  # noqa: BLE001 - one book must not break the sweep
+                log.warning(
+                    "Could not clear the identifier of book %s", link.book_id, exc_info=True
+                )
+                continue
+            cleared += 1
+        if cleared:
+            self._show_status(_("Removed {count} broken OneDrive link(s).").format(count=cleared))
+            log.info("Cleared %s stale OneDrive identifier(s)", cleared)
 
     def _on_apply_done(self, job) -> None:
         self._on_job_done(job)

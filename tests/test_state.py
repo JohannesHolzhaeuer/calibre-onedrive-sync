@@ -102,6 +102,22 @@ def test_book_links_round_trip(tmp_path):
         assert state.all_links() == []
 
 
+def test_prune_links_forgets_links_to_deleted_files(tmp_path):
+    with StateStore(str(tmp_path / "state.sqlite")) as state:
+        state.link_book(BookLink(book_id=1, drive_id="drive", item_id="live", name="A.epub"))
+        state.link_book(BookLink(book_id=2, drive_id="drive", item_id="gone", name="B.epub"))
+        state.link_book(BookLink(book_id=3, drive_id="other", item_id="elsewhere", name="C.epub"))
+
+        stale = state.prune_links("drive", {"live"})
+
+        assert [link.book_id for link in stale] == [2]
+        assert state.get_link(2) is None
+        assert state.get_link(1) is not None
+        # Another drive is none of our business.
+        assert state.get_link(3) is not None
+        assert [link.book_id for link in state.all_links()] == [1, 3]
+
+
 def test_imported_link_by_book_and_remote_metadata(tmp_path):
     with StateStore(str(tmp_path / "state.sqlite")) as state:
         assert state.get_import_by_book(1) is None

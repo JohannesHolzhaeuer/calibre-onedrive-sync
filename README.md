@@ -194,6 +194,10 @@ access token is never written to disk.
 - **Links**: each linked book gets an `onedrive` identifier containing the
   OneDrive web URL (or the item id when Graph supplies no URL). The SQLite state
   stores the same information so a reinstall can rebuild it on the next scan.
+  If you delete files in OneDrive yourself, the next scan sees that the linked
+  files are gone: those links are dropped, the `onedrive` identifier is removed
+  from the affected books and they are offered for upload again, so an emptied
+  folder is never reported as full.
 - **No local deletes**: removing a book locally or remotely does not delete the
   other copy. Only an explicitly ticked duplicate in the review window is
   removed, and it goes to the OneDrive recycle bin.

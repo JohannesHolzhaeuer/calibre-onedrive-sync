@@ -120,6 +120,8 @@ class SyncEngine:
         self.should_abort = should_abort
         self.temp_root = temp_root
         self._export_folder: RemoteItem | None = None
+        #: Links the last scan found to point at deleted files (GUI clears them).
+        self.stale_links: list[BookLink] = []
 
     # -- public API ---------------------------------------------------------
 
@@ -182,6 +184,8 @@ class SyncEngine:
             _("Found {count} file(s) in OneDrive.").format(count=len(remote_items)),
         )
         _index_item, index = self._load_index(remote_items)
+        self._prune_stale_links(remote_items)
+        links = {(link.drive_id, link.item_id): link.book_id for link in self.state.all_links()}
         plan = build_reconcile_plan(
             local_books,
             remote_items,
@@ -737,6 +741,26 @@ class SyncEngine:
             log.warning("Could not read the OneDrive index", exc_info=True)
             return None
         return index if index.books else None
+
+    def _prune_stale_links(self, remote_items: list[RemoteItem]) -> None:
+        """Forget links whose file has vanished from the selected folder.
+
+        Deleting the files in OneDrive by hand (or with the web UI) is the normal
+        way a backup gets cleared, and the plugin is not told about it. Without
+        this the review window keeps showing those books as linked to OneDrive
+        forever, so the folder looks populated while it is empty.
+        """
+        stale = self.state.prune_links(self.settings.drive_id, {item.id for item in remote_items})
+        self.stale_links = stale
+        if not stale:
+            return
+        log.info("Dropped %d stale OneDrive link(s)", len(stale))
+        self._report(
+            SCAN_METADATA_END,
+            _("Ignored {count} link(s) to files that are no longer in OneDrive.").format(
+                count=len(stale)
+            ),
+        )
 
     def _load_index(
         self,

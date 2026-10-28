@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import time
+from collections.abc import Iterable
 
 from .models import BookLink, ExportRecord
 
@@ -220,6 +221,24 @@ class StateStore:
     def unlink_book(self, book_id: int) -> None:
         self._conn.execute("DELETE FROM book_links WHERE book_id = ?", (int(book_id),))
         self._conn.commit()
+
+    def prune_links(self, drive_id: str, item_ids: Iterable[str]) -> list[BookLink]:
+        """Drop this drive's links whose item is not in ``item_ids``.
+
+        Files deleted in OneDrive outside the plugin leave links behind that point
+        at nothing, so the book keeps a link and a calibre identifier for a file
+        that no longer exists. A scan knows which items are really there, which
+        makes it the right moment to forget the rest. Returns what was dropped.
+        """
+        keep = set(item_ids)
+        stale = [
+            link
+            for link in self.all_links()
+            if link.drive_id == drive_id and link.item_id not in keep
+        ]
+        for link in stale:
+            self.unlink_book(link.book_id)
+        return stale
 
     @staticmethod
     def _link_from_row(row) -> BookLink | None:
