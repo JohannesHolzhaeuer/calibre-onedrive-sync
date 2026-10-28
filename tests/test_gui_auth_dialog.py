@@ -219,3 +219,16 @@ def test_sign_in_accepted_but_not_signed_in(monkeypatch):
     ok, profile = sign_in(None, FakeAuth())
     assert not ok
     assert profile == {}
+
+
+def test_sign_in_returns_the_failure_reason(monkeypatch):
+    class Failed(FakeDialog):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.signed_in = False
+            self.error = "connection reset by peer"
+
+    monkeypatch.setattr(auth_dialog, "DeviceCodeDialog", Failed)
+    ok, profile = sign_in(None, FakeAuth())
+    assert not ok
+    assert profile == {"error": "connection reset by peer"}

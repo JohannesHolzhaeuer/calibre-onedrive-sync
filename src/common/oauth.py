@@ -71,14 +71,32 @@ def _error_from(exc: HttpError) -> tuple[str, str]:
     return str(payload.get("error", "")), str(payload.get("error_description", ""))
 
 
+#: Sign-in runs in a dialog the user is waiting on, so a hung socket must be
+#: given up quickly and picked up by the retry loop instead of blocking for the
+#: general 30 s default.
+AUTH_TIMEOUT = 12
+
+
 def _post_form(url: str, fields: dict, transport: Transport | None) -> dict:
     return request_json(
         "POST",
         url,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         data=urlencode(fields).encode("utf-8"),
+        timeout=AUTH_TIMEOUT,
         transport=transport,
     )
+
+
+#: A reset/aborted socket has no HTTP status; retry it a few times before
+#: giving up, because Microsoft's sign-in endpoints occasionally drop a
+#: connection (WinError 10054 / similar) during the device-code flow.
+TRANSPORT_RETRY_LIMIT = 5
+DEVICE_CODE_ATTEMPTS = 3
+
+
+def _is_transport_error(exc: HttpError) -> bool:
+    return exc.status == 0
 
 
 def start_device_code(
@@ -86,19 +104,28 @@ def start_device_code(
     *,
     scopes: str = SCOPES,
     transport: Transport | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> DeviceCode:
     """Start the device-code flow and return the code the user must enter."""
     if not client_id.strip():
         raise AuthError("No Microsoft app (client) ID is configured.")
-    try:
-        data = _post_form(
-            f"{_auth_base(client_id)}/devicecode",
-            {"client_id": client_id, "scope": scopes},
-            transport,
-        )
-    except HttpError as exc:
-        error, description = _error_from(exc)
-        raise AuthError(description or error or str(exc)) from exc
+    data: dict = {}
+    for attempt in range(DEVICE_CODE_ATTEMPTS):
+        try:
+            data = _post_form(
+                f"{_auth_base(client_id)}/devicecode",
+                {"client_id": client_id, "scope": scopes},
+                transport,
+            )
+            break
+        except HttpError as exc:
+            if _is_transport_error(exc) and attempt + 1 < DEVICE_CODE_ATTEMPTS:
+                sleep(1.0 + attempt)
+                continue
+            error, description = _error_from(exc)
+            if _is_transport_error(exc):
+                raise AuthError(f"Could not reach the Microsoft sign-in service: {exc}") from exc
+            raise AuthError(description or error or str(exc)) from exc
 
     device_code = str(data.get("device_code", ""))
     user_code = str(data.get("user_code", ""))
@@ -144,6 +171,7 @@ def poll_device_code(
     """
     deadline = clock() + max(1, device_code.expires_in)
     wait = max(1, device_code.interval)
+    transport_failures = 0
     while clock() < deadline:
         if should_abort is not None and should_abort():
             raise AuthError("Sign-in cancelled.")
@@ -160,9 +188,16 @@ def poll_device_code(
             return _token_from_response(data)
         except HttpError as exc:
             error, description = _error_from(exc)
-            if error == "authorization_pending":
-                pass
+            if _is_transport_error(exc):
+                transport_failures += 1
+                if transport_failures >= TRANSPORT_RETRY_LIMIT:
+                    raise AuthError(
+                        f"Could not reach the Microsoft sign-in service: {exc}"
+                    ) from exc
+            elif error == "authorization_pending":
+                transport_failures = 0
             elif error == "slow_down":
+                transport_failures = 0
                 wait += 5
             elif error == "expired_token":
                 raise AuthError("The sign-in code expired. Start sign-in again.") from exc
@@ -179,28 +214,39 @@ def refresh_access_token(
     refresh_token: str,
     *,
     transport: Transport | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> TokenSet:
     """Exchange a stored refresh token for a fresh access token."""
     if not client_id.strip():
         raise AuthError("No Microsoft app (client) ID is configured.")
     if not refresh_token.strip():
         raise NotSignedInError("Sign in to OneDrive first.")
-    try:
-        data = _post_form(
-            f"{_auth_base(client_id)}/token",
-            {
-                "grant_type": "refresh_token",
-                "client_id": client_id,
-                "refresh_token": refresh_token,
-                "scope": SCOPES,
-            },
-            transport,
-        )
-    except HttpError as exc:
-        error, description = _error_from(exc)
-        if error == "invalid_grant":
-            raise NotSignedInError("The saved OneDrive session expired. Sign in again.") from exc
-        raise AuthError(description or error or str(exc)) from exc
+    data: dict = {}
+    for attempt in range(DEVICE_CODE_ATTEMPTS):
+        try:
+            data = _post_form(
+                f"{_auth_base(client_id)}/token",
+                {
+                    "grant_type": "refresh_token",
+                    "client_id": client_id,
+                    "refresh_token": refresh_token,
+                    "scope": SCOPES,
+                },
+                transport,
+            )
+            break
+        except HttpError as exc:
+            if _is_transport_error(exc) and attempt + 1 < DEVICE_CODE_ATTEMPTS:
+                sleep(1.0 + attempt)
+                continue
+            error, description = _error_from(exc)
+            if _is_transport_error(exc):
+                raise AuthError(f"Could not reach the Microsoft sign-in service: {exc}") from exc
+            if error == "invalid_grant":
+                raise NotSignedInError(
+                    "The saved OneDrive session expired. Sign in again."
+                ) from exc
+            raise AuthError(description or error or str(exc)) from exc
     token = _token_from_response(data)
     # Some responses omit the refresh token; keep the old one in that case.
     if not token.refresh_token:

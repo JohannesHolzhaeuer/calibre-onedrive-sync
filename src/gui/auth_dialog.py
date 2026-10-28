@@ -23,7 +23,10 @@ from qt.core import (
 
 from ..common.auth import AuthManager
 from ..common.i18n import _
+from ..common.log import get_logger
 from ..common.oauth import DeviceCode
+
+log = get_logger("onedrive_sync.auth")
 
 _ACTIVE_WORKERS: set[QThread] = set()
 
@@ -57,6 +60,8 @@ class _AuthWorker(QThread):
                     profile = {}
             self.succeeded.emit({"token": token, "profile": profile})
         except Exception as exc:  # noqa: BLE001 - surfaced to the dialog
+            if not self._cancelled.is_set():
+                log.warning("OneDrive sign-in failed: %s", exc)
             self.failed.emit(str(exc))
 
 
@@ -67,6 +72,7 @@ class DeviceCodeDialog(QDialog):
         super().__init__(parent)
         self.auth = auth
         self.profile: dict = {}
+        self.error = ""
         self.signed_in = False
         self._device_code: DeviceCode | None = None
         self.setMinimumSize(560, 260)
@@ -142,6 +148,7 @@ class DeviceCodeDialog(QDialog):
 
     def _on_failure(self, message: str) -> None:
         self.signed_in = False
+        self.error = str(message)
         self.status.setText(_("Sign-in failed: {message}").format(message=message))
 
     def reject(self) -> None:
@@ -151,11 +158,16 @@ class DeviceCodeDialog(QDialog):
 
 
 def sign_in(parent, auth: AuthManager, *, profile_loader=None) -> tuple[bool, dict]:
-    """Show the dialog and return ``(signed_in, profile)``."""
+    """Show the dialog and return ``(signed_in, profile)``.
+
+    On failure the returned dict carries ``error`` with the reason shown in the
+    dialog, so the caller can keep it visible after the window closes.
+    """
     dialog = DeviceCodeDialog(auth, parent, profile_loader=profile_loader)
     dialog.start()
     result = dialog.exec()
     if result != QDialog.DialogCode.Accepted or not dialog.signed_in:
         dialog.reject()
-        return False, {}
+        error = getattr(dialog, "error", "")
+        return False, ({"error": error} if error else {})
     return True, dialog.profile
