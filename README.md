@@ -153,12 +153,14 @@ access token is never written to disk.
 
 ## How syncing behaves
 
-- **One click, one decision**: clicking the toolbar button uses the configured
-  OneDrive folder and checks it for `calibre-onedrive-index.json`. Only when no
-  folder is stored yet does the folder picker open.
-  - **Index found** → the matching window opens immediately and fills in while
-    the scan runs (local books first, then the OneDrive files, then
-    metadata-based refinements).
+- **One click, one window**: clicking the toolbar button opens the matching
+  window right away, so you always see what the plugin is doing. It uses the
+  configured OneDrive folder and checks it for `calibre-onedrive-index.json`
+  (a single request; the folder is never listed just for that). Only when no
+  folder is stored does the folder picker open first.
+  - **Index found** → the window fills in while the scan runs: local books
+    first, then the OneDrive files page by page, then metadata-based
+    refinements.
   - **No index** → you are asked whether to clear the folder (everything goes to
     the OneDrive recycle bin) and upload your whole library with a fresh index.
     Only a confirmed *Yes* starts that chain; any error or cancellation stops it.

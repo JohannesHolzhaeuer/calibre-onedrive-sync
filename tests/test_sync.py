@@ -9,7 +9,7 @@ import tempfile
 import pytest
 
 from onedrive_sync.common.config import Settings
-from onedrive_sync.common.errors import CancelledError
+from onedrive_sync.common.errors import CancelledError, GraphError
 from onedrive_sync.common.index import INDEX_FILENAME, BookIndex, IndexEntry
 from onedrive_sync.common.models import BookLink, ExportRecord, RemoteItem
 from onedrive_sync.common.reconcile import LocalBook, build_reconcile_plan
@@ -58,15 +58,28 @@ class FakeGraph:
         self.deleted = []
         self.delete_error = None
         self.get_item_error = None
+        self.get_item_calls = []
 
-    def list_children(self, drive_id, folder_id):
+    def list_children(self, drive_id, folder_id, *, on_page=None):
         self.list_calls.append((drive_id, folder_id))
-        return list(self.recursive)
+        children = list(self.recursive)
+        if on_page is not None:
+            on_page(children)
+        return children
 
     def get_item(self, drive_id, item_id):
+        self.get_item_calls.append((drive_id, item_id))
         if self.get_item_error is not None:
             raise self.get_item_error
         return remote(item_id, "Selected", folder=True)
+
+    def download_path(self, drive_id, path, dest):
+        """Serve a file addressed by path, like Graph's ``root:`` syntax does."""
+        name = str(path).rsplit("/", 1)[-1]
+        item = next((entry for entry in self.recursive if entry.name == name), None)
+        if item is None:
+            raise GraphError(404, "itemNot-found")
+        self.download(drive_id, item.id, dest)
 
     def download(self, drive_id, item_id, dest):
         if self.download_error is not None:
@@ -154,6 +167,8 @@ def write_index(graph, *entries):
         ]
     )
     graph.files["idx"] = index.to_json().encode()
+    if not any(entry.name == INDEX_FILENAME for entry in graph.recursive):
+        graph.recursive.append(remote("idx", INDEX_FILENAME))
 
 
 def test_filename_helpers():
@@ -442,15 +457,18 @@ def test_scan_reports_local_books_before_touching_the_network(tmp_path):
 
     assert [phase for phase, _statuses, _calls in phases] == [
         "library",
+        "listing",
         "onedrive",
         "final",
     ]
     # The window opens with the library contents before OneDrive is touched.
     assert phases[0][2] == []
     assert phases[0][1] == ["checking", "checking"]
+    # Every Graph page is reported while the listing is still running.
+    assert phases[1][1] == ["checking", "checking", "checking"]
     # One flat listing, then the plan with the matched and uploadable rows.
-    assert phases[1][2] == [("drive", "folder")]
-    assert phases[1][1] == ["upload", "matched"]
+    assert phases[2][2] == [("drive", "folder")]
+    assert phases[2][1] == ["upload", "matched"]
     assert {entry.status for entry in plan.entries} == {"matched", "upload"}
     state.close()
 
@@ -486,18 +504,21 @@ def test_scan_reports_metadata_matches_while_probing(tmp_path, monkeypatch):
 
     assert phases == [
         "library",
+        "listing",
         "onedrive",
         "metadata",
         "metadata",
         "final",
     ]
-    # The library snapshot has no remote rows; the flat listing marks the files
-    # as downloads, and the probes turn one into a match while the second
-    # becomes a duplicate of the same book.
+    # The library snapshot has no remote rows; the listing snapshot shows the
+    # files as soon as they are seen, the flat listing marks them as downloads
+    # and the probes turn one into a match while the second becomes a duplicate
+    # of the same book.
     assert remote_statuses[0] == []
-    assert remote_statuses[1] == ["download", "download"]
-    assert set(remote_statuses[2]) == {"download", "matched"}
-    assert set(remote_statuses[3]) == {"duplicate", "matched"}
+    assert remote_statuses[1] == ["checking", "checking"]
+    assert remote_statuses[2] == ["download", "download"]
+    assert set(remote_statuses[3]) == {"download", "matched"}
+    assert set(remote_statuses[4]) == {"duplicate", "matched"}
     assert {entry.status for entry in plan.entries} == {"matched", "duplicate"}
     state.close()
 
@@ -765,6 +786,101 @@ def test_index_available_only_when_usable(tmp_path):
 
     write_index(graph, (1, "file", "a.epub"))
     assert engine.index_available() is True
+    state.close()
+
+
+def test_index_check_reads_the_file_without_listing_the_folder(tmp_path):
+    graph = FakeGraph()
+    write_index(graph, (1, "file", "a.epub"))
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder", folder_path="/data/ebook")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    assert engine.index_available() is True
+    # A folder with thousands of files must not be listed just for one known file.
+    assert graph.list_calls == []
+    state.close()
+
+
+def test_index_check_verifies_the_folder_when_the_file_is_missing(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    assert engine.index_available() is False
+    assert graph.get_item_calls == [("drive", "folder")]
+    state.close()
+
+
+def test_index_check_reports_a_folder_that_is_gone(tmp_path):
+    graph = FakeGraph()
+    graph.get_item_error = GraphError(404, "item not found")
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    with pytest.raises(GraphError) as caught:
+        engine.index_available()
+
+    assert caught.value.status == 404
+    state.close()
+
+
+def test_index_check_is_skipped_when_cancelled(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings, should_abort=lambda: True)
+
+    assert engine.index_available() is False
+    assert graph.list_calls == []
+    state.close()
+
+
+def test_scan_cancels_while_the_folder_is_being_listed(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote("book", "Jane Doe - The Book.epub")]
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    calls = {"n": 0}
+
+    def abort_at_the_listing_page():
+        calls["n"] += 1
+        return calls["n"] >= 3
+
+    engine, state = make_engine(
+        tmp_path, graph, library, settings, should_abort=abort_at_the_listing_page
+    )
+
+    with pytest.raises(CancelledError):
+        engine.scan()
+
+    assert graph.list_calls == [("drive", "folder")]
+    state.close()
+
+
+def test_scan_cancels_right_after_the_listing(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote("book", "Jane Doe - The Book.epub")]
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    calls = {"n": 0}
+
+    def abort_after_the_listing():
+        calls["n"] += 1
+        return calls["n"] >= 4
+
+    engine, state = make_engine(
+        tmp_path, graph, library, settings, should_abort=abort_after_the_listing
+    )
+
+    with pytest.raises(CancelledError):
+        engine.scan()
+
+    assert graph.list_calls == [("drive", "folder")]
     state.close()
 
 

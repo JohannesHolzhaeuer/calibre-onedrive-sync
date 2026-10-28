@@ -127,8 +127,7 @@ class SyncEngine:
         """True when the selected folder holds a usable calibre index."""
         if self._aborted():
             return False
-        _item, index = self._load_index(self._list_folder())
-        return index is not None
+        return self._load_index_by_path() is not None
 
     def scan(self) -> ReconcilePlan:
         """Compare the calibre library with the selected OneDrive folder.
@@ -155,7 +154,27 @@ class SyncEngine:
         )
 
         self._report(SCAN_LISTING_START, _("Listing files in OneDrive…"))
-        remote_items = self._list_folder()
+        listed: list[RemoteItem] = []
+        pages = 0
+
+        def on_page(page: list[RemoteItem]) -> None:
+            """Report every Graph page so the window fills in while listing runs."""
+            nonlocal pages
+            pages += 1
+            listed.extend(page)
+            ramp = 1 - 1 / (1 + pages / 4)
+            self._report(
+                SCAN_LISTING_START + (SCAN_LISTING_END - SCAN_LISTING_START) * ramp,
+                _("Found {count} file(s) in OneDrive…").format(count=len(listed)),
+            )
+            self._notify_plan(
+                build_pending_plan(local_books, listed, links=links, preference=preference),
+                "listing",
+            )
+            if self._aborted():
+                raise CancelledError("Cancelled.")
+
+        remote_items = self._list_folder(on_page)
         if self._aborted():
             raise CancelledError("Cancelled.")
         self._report(
@@ -548,13 +567,28 @@ class SyncEngine:
         except Exception:  # noqa: BLE001 - calibre metadata is best-effort
             log.warning("Could not save the OneDrive link for book %s", link.book_id, exc_info=True)
 
-    def _list_folder(self) -> list[RemoteItem]:
-        """Direct children of the selected folder (subfolders are never entered)."""
-        children = self.graph.list_children(
+    def _list_folder(
+        self, on_page: Callable[[list[RemoteItem]], None] | None = None
+    ) -> list[RemoteItem]:
+        """Direct children of the selected folder (subfolders are never entered).
+
+        ``on_page`` is called with every Graph page, which lets a scan report the
+        files it found while a large folder is still being listed.
+        """
+        seen: list[RemoteItem] = []
+
+        def report(page: list[RemoteItem]) -> None:
+            alive = [item for item in page if not item.deleted]
+            seen.extend(alive)
+            if on_page is not None:
+                on_page(alive)
+
+        self.graph.list_children(
             self.settings.drive_id,
             self.settings.folder_id,
+            on_page=report,
         )
-        return [item for item in children if not item.deleted]
+        return seen
 
     def _ensure_export_folder(self) -> RemoteItem:
         """The selected folder is the destination; there is no export subfolder."""
@@ -671,6 +705,38 @@ class SyncEngine:
         return self.graph.upload_file(drive_id, parent_id, name, path, conflict="rename")
 
     # -- calibre index ------------------------------------------------------
+
+    def _index_path(self) -> str:
+        """Path of the index file inside the selected folder."""
+        folder = str(self.settings.folder_path or "").rstrip("/")
+        return f"{folder}/{INDEX_FILENAME}"
+
+    def _load_index_by_path(self) -> BookIndex | None:
+        """Read the index file directly by its path.
+
+        Listing a whole folder to find one known file is slow on the big
+        libraries people keep in OneDrive, so this addresses the file itself and
+        needs a single request.
+        """
+        try:
+            with tempfile.TemporaryDirectory(
+                prefix="onedrive-index-", dir=self.temp_root
+            ) as temp_dir:
+                dest = os.path.join(temp_dir, INDEX_FILENAME)
+                self.graph.download_path(self.settings.drive_id, self._index_path(), dest)
+                with open(dest, encoding="utf-8") as handle:
+                    index = BookIndex.from_json(handle.read())
+        except GraphError as exc:
+            if exc.status != 404:
+                raise
+            # A missing index file is the normal first run, a missing folder is a
+            # setup problem: confirm which of the two it is, then report the folder.
+            self.graph.get_item(self.settings.drive_id, self.settings.folder_id)
+            return None
+        except Exception:  # noqa: BLE001 - a broken index counts as missing
+            log.warning("Could not read the OneDrive index", exc_info=True)
+            return None
+        return index if index.books else None
 
     def _load_index(
         self,

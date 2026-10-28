@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import types
 
+import pytest
 from qt.core import QDialog, QMessageBox
 
 from onedrive_sync.common.config import Settings
@@ -292,6 +293,8 @@ class FakeScanEngine:
             self.phases.append("library")
             self.on_plan(self.plan, "onedrive")
             self.phases.append("onedrive")
+            if self.should_abort is not None and self.should_abort():
+                raise CancelledError("Cancelled.")
         return self.plan
 
 
@@ -331,6 +334,8 @@ def click_through(action, monkeypatch, *, accept=False, while_open=None, choice=
 
     def fake_exec(dialog):
         captured["dialog"] = dialog
+        # The modal loop is where calibre delivers the index-check callback.
+        run_index_check(action)
         if while_open is not None:
             while_open(dialog)
         if accept:
@@ -340,7 +345,6 @@ def click_through(action, monkeypatch, *, accept=False, while_open=None, choice=
 
     monkeypatch.setattr(action_mod.ReviewDialog, "exec", fake_exec)
     action.review_now()
-    run_index_check(action)
     return captured["dialog"]
 
 
@@ -863,7 +867,7 @@ def test_review_now_cancels_when_the_folder_picker_is_cancelled(monkeypatch):
     monkeypatch.setattr(action, "_settings_for", lambda: Settings(client_id="c"))
     monkeypatch.setattr(action, "_pick_folder", lambda _settings: None)
     opened = []
-    monkeypatch.setattr(action, "_open_review", lambda: opened.append(1))
+    monkeypatch.setattr(action, "_open_window", lambda: opened.append(1))
 
     action.review_now()
 
@@ -871,21 +875,31 @@ def test_review_now_cancels_when_the_folder_picker_is_cancelled(monkeypatch):
     assert action._state is None
 
 
-def test_review_now_uses_the_configured_folder_without_asking(monkeypatch):
+def test_review_now_opens_the_window_before_touching_the_network(monkeypatch):
     action = review_action(monkeypatch)
+    seen = {}
 
-    def no_picker(_settings):
-        raise AssertionError("a configured folder must not ask for a new one")
+    def fake_exec(dialog):
+        # The window is on screen while the index check is still queued.
+        seen["rows_at_open"] = dialog.tree.topLevelItemCount()
+        seen["status_at_open"] = dialog.status.text()
+        seen["job_queued"] = len(action.gui.job_manager.jobs)
+        seen["apply_enabled"] = dialog.apply_button.isEnabled()
 
-    monkeypatch.setattr(action, "_pick_folder", no_picker)
+    monkeypatch.setattr(action_mod.ReviewDialog, "exec", fake_exec)
+    monkeypatch.setattr(action, "_pick_folder", lambda _settings: pytest.fail("no picker"))
     saved = []
     monkeypatch.setattr(action_mod, "save_settings", lambda value: saved.append(value))
 
     action.review_now()
 
-    assert action.gui.job_manager.jobs  # the index check started right away
+    assert seen == {
+        "rows_at_open": 0,
+        "status_at_open": "Checking the OneDrive folder for a calibre index…",
+        "job_queued": 1,
+        "apply_enabled": False,
+    }
     assert saved == []  # the stored folder is not written back
-    assert "calibre index" in action.gui.status_bar.messages[-1]
 
 
 def test_review_now_asks_for_a_folder_when_none_is_configured(monkeypatch):
@@ -900,32 +914,64 @@ def test_review_now_asks_for_a_folder_when_none_is_configured(monkeypatch):
     monkeypatch.setattr(action, "_pick_folder", fake_picker)
     saved = []
     monkeypatch.setattr(action_mod, "save_settings", lambda value: saved.append(value))
+    monkeypatch.setattr(action_mod.ReviewDialog, "exec", lambda dialog: QDialog.DialogCode.Rejected)
 
     action.review_now()
 
     assert picked == [1]
     assert saved and saved[0].folder_id == "f2"
-    assert action.gui.job_manager.jobs
+    assert action.gui.job_manager.jobs  # the window opened and the check started
 
 
 def test_a_missing_folder_asks_for_a_new_one(monkeypatch):
     action = review_action(monkeypatch)
-    warnings = []
-    monkeypatch.setattr(action_mod.QMessageBox, "warning", lambda *args: warnings.append(args))
     rescued = []
     monkeypatch.setattr(action, "_reselect_folder", lambda: rescued.append(1))
 
     action._job = index_job(None, failed=True, error=GraphError(404, "item not found"))
     action._on_index_checked(action._job)
 
-    assert warnings and "no longer exists" in warnings[0][2]
+    assert "no longer exists" in action.gui.status_bar.messages[-1]
     assert rescued == [1]
+    assert action._state is None
+
+
+def test_a_cancelled_folder_reselection_closes_the_state(monkeypatch):
+    action = review_action(monkeypatch)
+    monkeypatch.setattr(action, "_pick_folder", lambda _settings: None)
+
+    action._reselect_folder()
+
+    assert action._state is None
+
+
+def test_a_scan_without_a_window_releases_the_state(monkeypatch):
+    action = review_action(monkeypatch)
+
+    action._review_dialog = None
+    action._start_scan()
+    action._close_window()
+
+    assert action._state is None
+    assert action._job is None
+
+
+def test_a_index_check_callback_without_a_job_is_a_dead_end(monkeypatch):
+    action = review_action(monkeypatch)
+    action._job = "live"
+
+    action._on_index_checked(None)
+
+    assert "without a result" in action.gui.status_bar.messages[-1]
+    assert action._state is None
 
 
 def test_reselecting_a_folder_needs_a_usable_configuration(monkeypatch):
     action = review_action(monkeypatch)
     picked = []
+    opened = []
     monkeypatch.setattr(action, "_pick_folder", lambda _settings: picked.append(1))
+    monkeypatch.setattr(action, "_open_window", lambda: opened.append(1))
 
     monkeypatch.setattr(action, "_settings_for", lambda: None)
     action._reselect_folder()
@@ -935,10 +981,11 @@ def test_reselecting_a_folder_needs_a_usable_configuration(monkeypatch):
     action._reselect_folder()
 
     assert picked == []
+    assert opened == []
     assert action.gui.job_manager.jobs == []
 
 
-def test_reselecting_a_folder_continues_with_the_index_check(monkeypatch):
+def test_reselecting_a_folder_reopens_the_window_with_the_new_folder(monkeypatch):
     action = review_action(monkeypatch)
     settings = Settings(client_id="c", drive_id="d", folder_id="gone")
     monkeypatch.setattr(action, "_settings_for", lambda: settings)
@@ -951,13 +998,15 @@ def test_reselecting_a_folder_continues_with_the_index_check(monkeypatch):
     monkeypatch.setattr(action, "_pick_folder", fake_picker)
     saved = []
     monkeypatch.setattr(action_mod, "save_settings", lambda value: saved.append(value))
+    opened = []
+    monkeypatch.setattr(action, "_open_window", lambda: opened.append(1))
 
     action._reselect_folder()
 
     assert picked == [1]
     assert (settings.drive_id, settings.folder_id) == ("d2", "f2")
     assert saved == [settings]
-    assert action.gui.job_manager.jobs
+    assert opened == [1]
 
 
 def test_review_now_remembers_the_chosen_folder(monkeypatch):
@@ -976,10 +1025,11 @@ def test_review_now_remembers_the_chosen_folder(monkeypatch):
 
 def test_review_now_without_index_offers_clear_and_upload(monkeypatch):
     action = review_action(monkeypatch, FakeScanEngine(sample_plan(), has_index=False))
+    asked = []
     monkeypatch.setattr(
         action_mod.QMessageBox,
         "question",
-        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+        lambda *args: asked.append(args) or QMessageBox.StandardButton.Yes,
     )
     started = []
 
@@ -988,16 +1038,14 @@ def test_review_now_without_index_offers_clear_and_upload(monkeypatch):
         return "task"
 
     monkeypatch.setattr(action_mod, "start_task_job", fake_task)
-    opened = []
-    monkeypatch.setattr(action, "_open_review", lambda: opened.append(1))
 
-    action.review_now()
-    run_index_check(action)
+    dialog = click_through(action, monkeypatch)
 
+    # The offer comes from the open window, not from behind a closed one.
+    assert asked[0][0] is dialog
     assert started == ["clear_backup"]
     assert action._task == "clear_backup"
     assert action._next_task == "upload_all"
-    assert opened == []
     assert action._state is not None
 
 
@@ -1009,25 +1057,23 @@ def test_review_now_without_index_can_be_cancelled(monkeypatch):
         lambda *_args, **_kwargs: QMessageBox.StandardButton.No,
     )
     started = []
-    opened = []
     monkeypatch.setattr(action_mod, "start_task_job", lambda *_args, **_kwargs: started.append(1))
-    monkeypatch.setattr(action, "_open_review", lambda: opened.append(1))
 
-    action.review_now()
-    run_index_check(action)
+    click_through(action, monkeypatch)
 
-    assert opened == [] and started == []
+    assert started == []
     assert action._state is None
     assert "cancelled" in action.gui.status_bar.messages[-1].lower()
 
 
-def test_review_now_with_an_index_opens_the_window(monkeypatch):
+def test_review_now_with_an_index_scans_into_the_open_window(monkeypatch):
     action = review_action(monkeypatch)
-    opened = []
-    monkeypatch.setattr(action, "_open_review", lambda: opened.append(1))
-    action.review_now()
-    run_index_check(action)
-    assert opened == [1]
+    started = []
+    monkeypatch.setattr(action, "_start_scan", lambda: started.append(1))
+
+    click_through(action, monkeypatch)
+
+    assert started == [1]
 
 
 def index_job(result, *, failed=False, killed=False, error=None):
@@ -1044,28 +1090,24 @@ def index_job(result, *, failed=False, killed=False, error=None):
 
 def test_index_check_failure_is_reported_and_closes_the_state(monkeypatch):
     action = review_action(monkeypatch)
-    warnings = []
-    monkeypatch.setattr(action_mod.QMessageBox, "warning", lambda *args: warnings.append(args))
 
     action._job = index_job(None, failed=True, error="graph down")
     action._on_index_checked(action._job)
 
-    assert warnings and "graph down" in warnings[0][2]
+    assert "graph down" in action.gui.status_bar.messages[-1]
     assert action._state is None
     assert action._job is None
 
 
 def test_index_check_without_result_warns_instead_of_clearing(monkeypatch):
     action = review_action(monkeypatch)
-    warnings = []
     asked = []
-    monkeypatch.setattr(action_mod.QMessageBox, "warning", lambda *args: warnings.append(args))
     monkeypatch.setattr(action_mod.QMessageBox, "question", lambda *args: asked.append(args))
 
     action._job = index_job(None)
     action._on_index_checked(action._job)
 
-    assert warnings
+    assert "calibre index" in action.gui.status_bar.messages[-1]
     assert asked == []
     assert action._state is None
 
