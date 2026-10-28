@@ -8,7 +8,7 @@ import types
 from qt.core import QDialog, QMessageBox
 
 from onedrive_sync.common.config import Settings
-from onedrive_sync.common.errors import CancelledError
+from onedrive_sync.common.errors import CancelledError, GraphError
 from onedrive_sync.common.models import BookLink, FolderRef, RemoteItem, SyncResult
 from onedrive_sync.common.reconcile import LocalBook, build_pending_plan, build_reconcile_plan
 from onedrive_sync.gui import action as action_mod
@@ -860,6 +860,7 @@ def test_pick_folder_reports_failures(monkeypatch):
 
 def test_review_now_cancels_when_the_folder_picker_is_cancelled(monkeypatch):
     action = review_action(monkeypatch)
+    monkeypatch.setattr(action, "_settings_for", lambda: Settings(client_id="c"))
     monkeypatch.setattr(action, "_pick_folder", lambda _settings: None)
     opened = []
     monkeypatch.setattr(action, "_open_review", lambda: opened.append(1))
@@ -868,6 +869,95 @@ def test_review_now_cancels_when_the_folder_picker_is_cancelled(monkeypatch):
 
     assert opened == []
     assert action._state is None
+
+
+def test_review_now_uses_the_configured_folder_without_asking(monkeypatch):
+    action = review_action(monkeypatch)
+
+    def no_picker(_settings):
+        raise AssertionError("a configured folder must not ask for a new one")
+
+    monkeypatch.setattr(action, "_pick_folder", no_picker)
+    saved = []
+    monkeypatch.setattr(action_mod, "save_settings", lambda value: saved.append(value))
+
+    action.review_now()
+
+    assert action.gui.job_manager.jobs  # the index check started right away
+    assert saved == []  # the stored folder is not written back
+    assert "calibre index" in action.gui.status_bar.messages[-1]
+
+
+def test_review_now_asks_for_a_folder_when_none_is_configured(monkeypatch):
+    action = review_action(monkeypatch)
+    monkeypatch.setattr(action, "_settings_for", lambda: Settings(client_id="c"))
+    picked = []
+
+    def fake_picker(_settings):
+        picked.append(1)
+        return FolderRef("d2", "f2", "Books", "/Books")
+
+    monkeypatch.setattr(action, "_pick_folder", fake_picker)
+    saved = []
+    monkeypatch.setattr(action_mod, "save_settings", lambda value: saved.append(value))
+
+    action.review_now()
+
+    assert picked == [1]
+    assert saved and saved[0].folder_id == "f2"
+    assert action.gui.job_manager.jobs
+
+
+def test_a_missing_folder_asks_for_a_new_one(monkeypatch):
+    action = review_action(monkeypatch)
+    warnings = []
+    monkeypatch.setattr(action_mod.QMessageBox, "warning", lambda *args: warnings.append(args))
+    rescued = []
+    monkeypatch.setattr(action, "_reselect_folder", lambda: rescued.append(1))
+
+    action._job = index_job(None, failed=True, error=GraphError(404, "item not found"))
+    action._on_index_checked(action._job)
+
+    assert warnings and "no longer exists" in warnings[0][2]
+    assert rescued == [1]
+
+
+def test_reselecting_a_folder_needs_a_usable_configuration(monkeypatch):
+    action = review_action(monkeypatch)
+    picked = []
+    monkeypatch.setattr(action, "_pick_folder", lambda _settings: picked.append(1))
+
+    monkeypatch.setattr(action, "_settings_for", lambda: None)
+    action._reselect_folder()
+
+    monkeypatch.setattr(action, "_settings_for", lambda: Settings(client_id="c"))
+    monkeypatch.setattr(action, "_prepare_engine", lambda _settings: False)
+    action._reselect_folder()
+
+    assert picked == []
+    assert action.gui.job_manager.jobs == []
+
+
+def test_reselecting_a_folder_continues_with_the_index_check(monkeypatch):
+    action = review_action(monkeypatch)
+    settings = Settings(client_id="c", drive_id="d", folder_id="gone")
+    monkeypatch.setattr(action, "_settings_for", lambda: settings)
+    picked = []
+
+    def fake_picker(_settings):
+        picked.append(1)
+        return FolderRef("d2", "f2", "Books", "/Books")
+
+    monkeypatch.setattr(action, "_pick_folder", fake_picker)
+    saved = []
+    monkeypatch.setattr(action_mod, "save_settings", lambda value: saved.append(value))
+
+    action._reselect_folder()
+
+    assert picked == [1]
+    assert (settings.drive_id, settings.folder_id) == ("d2", "f2")
+    assert saved == [settings]
+    assert action.gui.job_manager.jobs
 
 
 def test_review_now_remembers_the_chosen_folder(monkeypatch):
