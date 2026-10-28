@@ -16,9 +16,10 @@ the library changes: nothing leaves your machine and nothing is imported until
 you click the toolbar button. It only ever looks at the **direct children of the
 selected folder** — subfolders are never read.
 
-- **Folder per click**: the toolbar button opens the OneDrive folder picker,
-  prefilled with the folder you used last time. Confirm it and the plugin checks
-  whether that folder already carries a calibre index.
+- **Stored folder**: the toolbar button uses the OneDrive folder from the
+  settings — the picker only appears while setting the plugin up, when no folder
+  is stored yet. The plugin then checks whether that folder already carries a
+  calibre index.
 - **Index gate**: if the folder has a usable `calibre-onedrive-index.json`, the
   matching window opens. If it does not, the plugin offers to clear the folder
   and upload the whole library together with a fresh index.
@@ -137,8 +138,8 @@ Open *Preferences → Plugins → Customize plugin → OneDrive Sync*:
 2. Click **Sign in…**. A browser page opens; enter the short code shown in the
    dialog. The dialog closes automatically when sign-in succeeds.
 3. Click **Choose folder…** and select an existing folder from the tree. The
-   picker uses `/me/drive`; it does not list shared drives. This folder is only
-   the default — every toolbar click lets you confirm or change it.
+   picker uses `/me/drive`; it does not list shared drives. This folder is what
+   every toolbar click uses; change it here to point the plugin somewhere else.
 4. Choose the export format: **EPUB, falling back to PDF**, **EPUB only**, or
    **PDF only**. Books are always uploaded directly into the selected folder.
 5. Add the **OneDrive Sync** button to a toolbar via *Preferences → Toolbars &
@@ -152,15 +153,17 @@ access token is never written to disk.
 
 ## How syncing behaves
 
-- **One click, one decision**: clicking the toolbar button opens the OneDrive
-  folder picker with the current folder preselected. After you confirm it, the
-  plugin checks for `calibre-onedrive-index.json` in that folder.
+- **One click, one decision**: clicking the toolbar button uses the configured
+  OneDrive folder and checks it for `calibre-onedrive-index.json`. Only when no
+  folder is stored yet does the folder picker open.
   - **Index found** → the matching window opens immediately and fills in while
     the scan runs (local books first, then the OneDrive files, then
     metadata-based refinements).
   - **No index** → you are asked whether to clear the folder (everything goes to
     the OneDrive recycle bin) and upload your whole library with a fresh index.
     Only a confirmed *Yes* starts that chain; any error or cancellation stops it.
+  - **Folder is gone** (deleted or renamed since you chose it) → you are told so
+    and asked to pick a new folder.
   Closing the window stops the scan.
 - **Flat folder only**: only the direct children of the selected folder are
   listed. Nothing inside a subfolder is read, matched, downloaded or deleted.

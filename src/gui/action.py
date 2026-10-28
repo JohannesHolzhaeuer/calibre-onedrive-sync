@@ -1,10 +1,11 @@
 """OneDrive Sync InterfaceAction: the toolbar button drives everything.
 
-The plugin never syncs on its own. A click opens the OneDrive folder picker,
+The plugin never syncs on its own. A click uses the configured OneDrive folder,
 checks whether that folder already carries a usable calibre index and then
 either opens the matching window or offers to clear the folder and upload the
-whole library with a fresh index. Only the direct children of the selected
-folder are ever read.
+whole library with a fresh index. The folder picker only appears when no folder
+is configured, that is in the setup flow and when the settings dialog is opened
+from the toolbar. Only the direct children of the selected folder are ever read.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from ..common.config import (
     load_settings,
     save_settings,
 )
-from ..common.errors import CancelledError
+from ..common.errors import CancelledError, GraphError
 from ..common.graph import GraphClient
 from ..common.i18n import _
 from ..common.log import configure_logging, get_logger
@@ -109,7 +110,7 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         self.review_now()
 
     def review_now(self) -> None:
-        """Pick a folder, require an index, then open the matching window."""
+        """Require an index in the configured folder, then open the matching window."""
         self._clear_finished_job()
         if self._job is not None:
             return
@@ -119,12 +120,36 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         if not self._prepare_engine(settings):
             return
 
+        # The folder is stored in the settings, so a click does not ask for one:
+        # the settings dialog is where the folder is chosen. The picker only
+        # appears when nothing is stored, that is during the initial setup.
+        if self._configured_folder(settings) is not None:
+            self._check_index()
+            return
+        self._pick_and_check(settings)
+
+    def _configured_folder(self, settings) -> FolderRef | None:
+        """The folder from the settings, or ``None`` when none is stored."""
+        if not (settings.drive_id and settings.folder_id):
+            return None
+        return FolderRef(
+            drive_id=settings.drive_id,
+            item_id=settings.folder_id,
+            name=settings.folder_name,
+            path=settings.folder_path,
+        )
+
+    def _pick_and_check(self, settings) -> None:
+        """Ask for the OneDrive folder, store it and continue with the index check."""
         folder = self._pick_folder(settings)
         if folder is None:
             self._close_state()
             return
         self._remember_folder(settings, folder)
+        self._check_index()
 
+    def _check_index(self) -> None:
+        """Look for a calibre index in the selected folder, away from the GUI thread."""
         # Listing the folder and downloading the index are network calls, so
         # they run in a job instead of blocking the GUI thread.
         self._job = start_index_job(
@@ -148,14 +173,18 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
             self._show_status(_("OneDrive sync cancelled."))
             return
         if getattr(job, "failed", False):
-            message = str(getattr(job, "exception", "") or _("Unknown error"))
+            exception = getattr(job, "exception", None)
+            message = str(exception or _("Unknown error"))
             self._close_state()
             log.warning("Could not check the OneDrive folder: %s", message)
-            QMessageBox.warning(
-                self.gui,
-                _("OneDrive Sync"),
-                _("Could not check the OneDrive folder: {message}").format(message=message),
-            )
+            missing = isinstance(exception, GraphError) and exception.status == 404
+            if missing:
+                text = _("The configured OneDrive folder no longer exists. Pick a new one.")
+            else:
+                text = _("Could not check the OneDrive folder: {message}").format(message=message)
+            QMessageBox.warning(self.gui, _("OneDrive Sync"), text)
+            if missing:
+                self._reselect_folder()
             return
 
         available = getattr(job, "result", None)
@@ -180,6 +209,15 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
             return
 
         self._open_review()
+
+    def _reselect_folder(self) -> None:
+        """Ask for a folder after the stored one turned out to be unusable."""
+        settings = self._settings_for()
+        if settings is None:
+            return
+        if not self._prepare_engine(settings):
+            return
+        self._pick_and_check(settings)
 
     def _pick_folder(self, settings):
         """Let the user choose the OneDrive folder, prefilled with the current one."""

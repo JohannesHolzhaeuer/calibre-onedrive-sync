@@ -161,10 +161,11 @@ base branch (project) plus coverage of new lines (patch).
   `ConfigTokenStore` persists the refresh token (keyring if available, otherwise
   calibre JSON config).
 - The folder picker uses a lazily loaded tree for `/me/drive` only; shared drives
-  and drive shortcuts are not listed. It is opened on **every** toolbar click,
-  prefilled with the configured folder through :class:`FolderPickerDialog`'s
-  ``initial`` argument (the "Current folder: …" top-level entry). Keep all later
-  requests scoped to the chosen `drive_id`/`folder_id`.
+  and drive shortcuts are not listed. It is opened **only** when no folder is
+  stored yet (setup flow) or when a Graph 404 shows the stored folder is gone;
+  the picker is then prefilled through :class:`FolderPickerDialog`'s ``initial``
+  argument (the "Current folder: …" top-level entry). A configured folder is used
+  as-is. Keep all later requests scoped to the chosen `drive_id`/`folder_id`.
 - Exports always go directly into the selected folder. There is no export
   subfolder: `SyncEngine._ensure_export_folder` resolves the selected folder with
   `graph.get_item` and uploads into it.
@@ -192,13 +193,15 @@ base branch (project) plus coverage of new lines (patch).
   metadata read during the scan resolves files with unusual names; one book is
   assigned at most one remote item, and further copies are offered for deletion.
 - The toolbar click flow in `gui/action.py` is: `_settings_for` →
-  `_prepare_engine` → `_pick_folder` (prefilled picker) → `_remember_folder`
-  (persist) → `start_index_job` (an `IndexJob` runs `SyncEngine.index_available()`
-  off the GUI thread) → `_on_index_checked`. An index opens the review window
-  (`_open_review`); otherwise `_offer_fresh_upload` asks once and, on *Yes*, sets
+  `_prepare_engine` → `_configured_folder` (use the stored folder; `_pick_and_check`
+  → `_pick_folder` → `_remember_folder` only when none is stored) → `_check_index`
+  (`start_index_job` runs `SyncEngine.index_available()` off the GUI thread) →
+  `_on_index_checked`. An index opens the review window (`_open_review`);
+  otherwise `_offer_fresh_upload` asks once and, on *Yes*, sets
   `_next_task = "upload_all"` and starts `clear_backup`. `_on_task_done` keeps the
   engine/state alive and chains the follow-up only when the first task neither
-  failed nor was cancelled.
+  failed nor was cancelled. A Graph 404 during the check means the stored folder
+  is gone: `_reselect_folder` asks for a new one and continues the flow.
 - The review window's bulk buttons map to engine methods through `TaskJob`:
   `upload_all` (uploads missing books, links existing files, writes the index),
   `download_all` (imports every not-yet-imported ebook and deliberately keeps
