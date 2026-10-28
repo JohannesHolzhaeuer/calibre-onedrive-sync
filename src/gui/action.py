@@ -76,6 +76,7 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         self._scan_finished = False
         self._task = ""
         self._next_task = ""
+        self._pending_task = ""
         self.qaction.setIcon(
             get_icons(  # noqa: F821 - injected by calibre's plugin loader
                 "resources/images/onedrive.png", "onedrive_sync"
@@ -110,7 +111,7 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         self.review_now()
 
     def review_now(self) -> None:
-        """Require an index in the configured folder, then open the matching window."""
+        """Open the window at once, then check the index and scan into it."""
         self._clear_finished_job()
         if self._job is not None:
             return
@@ -119,14 +120,27 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
             return
         if not self._prepare_engine(settings):
             return
-
-        # The folder is stored in the settings, so a click does not ask for one:
-        # the settings dialog is where the folder is chosen. The picker only
-        # appears when nothing is stored, that is during the initial setup.
-        if self._configured_folder(settings) is not None:
-            self._check_index()
+        if not self._ensure_folder(settings):
+            self._close_state()
             return
-        self._pick_and_check(settings)
+        self._open_window()
+
+    def _open_window(self) -> None:
+        """Show the review window first so the user sees the work that follows."""
+        dialog = ReviewDialog(parent=self.gui)
+        dialog.start_scanning(_("Checking the OneDrive folder for a calibre index…"))
+        self._review_dialog = dialog
+        self._scan_plan = None
+        self._scan_finished = False
+        self._task = ""
+        self._next_task = ""
+        self._pending_task = ""
+        self._check_index()
+        try:
+            accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        finally:
+            self._review_dialog = None
+        self._finish_review(dialog, accepted)
 
     def _configured_folder(self, settings) -> FolderRef | None:
         """The folder from the settings, or ``None`` when none is stored."""
@@ -139,19 +153,23 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
             path=settings.folder_path,
         )
 
-    def _pick_and_check(self, settings) -> None:
-        """Ask for the OneDrive folder, store it and continue with the index check."""
+    def _ensure_folder(self, settings) -> bool:
+        """True when a folder is available, asking for one when none is stored.
+
+        The folder normally comes from the settings dialog, so a toolbar click
+        does not ask for it. The picker only appears during the initial setup and
+        after a Graph 404 shows that the stored folder is gone.
+        """
+        if self._configured_folder(settings) is not None:
+            return True
         folder = self._pick_folder(settings)
         if folder is None:
-            self._close_state()
-            return
+            return False
         self._remember_folder(settings, folder)
-        self._check_index()
+        return True
 
     def _check_index(self) -> None:
-        """Look for a calibre index in the selected folder, away from the GUI thread."""
-        # Listing the folder and downloading the index are network calls, so
-        # they run in a job instead of blocking the GUI thread.
+        """Look for a calibre index in the selected folder, off the GUI thread."""
         self._job = start_index_job(
             self.gui.job_manager,
             self._engine,
@@ -166,58 +184,95 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
             return
         self._job = None
         if job is None:
-            self._close_state()
+            self._stop_window(_("OneDrive matching stopped without a result."))
             return
         if self._job_cancelled(job):
-            self._close_state()
-            self._show_status(_("OneDrive sync cancelled."))
+            self._stop_window(_("OneDrive sync cancelled."))
             return
         if getattr(job, "failed", False):
             exception = getattr(job, "exception", None)
             message = str(exception or _("Unknown error"))
-            self._close_state()
             log.warning("Could not check the OneDrive folder: %s", message)
             missing = isinstance(exception, GraphError) and exception.status == 404
             if missing:
-                text = _("The configured OneDrive folder no longer exists. Pick a new one.")
-            else:
-                text = _("Could not check the OneDrive folder: {message}").format(message=message)
-            QMessageBox.warning(self.gui, _("OneDrive Sync"), text)
-            if missing:
+                self._stop_window(_("The configured OneDrive folder no longer exists."))
                 self._reselect_folder()
+            else:
+                self._stop_window(
+                    _("Could not check the OneDrive folder: {message}").format(message=message)
+                )
             return
 
         available = getattr(job, "result", None)
         if not isinstance(available, bool):
-            self._close_state()
             log.warning("The OneDrive index check returned no result")
-            QMessageBox.warning(
-                self.gui,
-                _("OneDrive Sync"),
-                _("Could not check the OneDrive folder for a calibre index."),
-            )
+            self._stop_window(_("Could not check the OneDrive folder for a calibre index."))
             return
 
         if not available:
             settings = self._engine.settings
             if not self._offer_fresh_upload(settings):
-                self._close_state()
-                self._show_status(_("OneDrive sync cancelled."))
+                self._stop_window(_("OneDrive sync cancelled."))
                 return
+            # Keep the engine alive: _finish_review starts the chain below.
+            self._pending_task = "clear_backup"
             self._next_task = "upload_all"
-            self._start_task("clear_backup", _("Clearing the OneDrive folder…"))
+            self._close_window()
             return
 
-        self._open_review()
+        self._start_scan()
+
+    def _start_scan(self) -> None:
+        """Scan the folder into the review window that is already open."""
+        dialog = self._review_dialog
+        if dialog is None:
+            self._close_state()
+            return
+        message = _("Comparing your library with OneDrive…")
+        dialog.start_scanning(message)
+        self._scan_plan = None
+        self._scan_finished = False
+        self._job = start_scan_job(
+            self.gui.job_manager,
+            self._engine,
+            self._scan_done.emit,
+            description=_("Matching OneDrive books"),
+            on_plan=self._scan_progress.emit,
+            on_progress=self._scan_status.emit,
+        )
+        self._show_status(message)
+
+    def _close_window(self) -> None:
+        """Close the review window; the flow continues in ``_finish_review``."""
+        dialog = self._review_dialog
+        if dialog is not None:
+            dialog.reject()
+            return
+        self._close_state()
+
+    def _stop_window(self, message: str) -> None:
+        """Report a dead end in the window and release the sync state."""
+        dialog = self._review_dialog
+        if dialog is not None:
+            dialog.set_failed(message)
+            dialog.reject()
+        self._close_state()
+        self._show_status(message)
 
     def _reselect_folder(self) -> None:
         """Ask for a folder after the stored one turned out to be unusable."""
         settings = self._settings_for()
         if settings is None:
+            self._close_state()
             return
         if not self._prepare_engine(settings):
             return
-        self._pick_and_check(settings)
+        folder = self._pick_folder(settings)
+        if folder is None:
+            self._close_state()
+            return
+        self._remember_folder(settings, folder)
+        self._open_window()
 
     def _pick_folder(self, settings):
         """Let the user choose the OneDrive folder, prefilled with the current one."""
@@ -254,8 +309,9 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
     def _offer_fresh_upload(self, settings) -> bool:
         """Ask whether to empty the folder and upload the whole library."""
         folder = settings.folder_path or settings.folder_name or settings.folder_id
+        parent = self._review_dialog if self._review_dialog is not None else self.gui
         answer = QMessageBox.question(
-            self.gui,
+            parent,
             _("OneDrive Sync"),
             _(
                 "No calibre index was found in {folder}. Clear that folder and "
@@ -266,30 +322,6 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
             QMessageBox.StandardButton.No,
         )
         return answer == QMessageBox.StandardButton.Yes
-
-    def _open_review(self) -> None:
-        """Open the matching window and scan while it is visible."""
-        dialog = ReviewDialog(parent=self.gui)
-        dialog.start_scanning()
-        self._review_dialog = dialog
-        self._scan_plan = None
-        self._scan_finished = False
-        self._task = ""
-        self._next_task = ""
-        self._job = start_scan_job(
-            self.gui.job_manager,
-            self._engine,
-            self._scan_done.emit,
-            description=_("Matching OneDrive books"),
-            on_plan=self._scan_progress.emit,
-            on_progress=self._scan_status.emit,
-        )
-        self._show_status(_("Comparing your library with OneDrive…"))
-        try:
-            accepted = dialog.exec() == QDialog.DialogCode.Accepted
-        finally:
-            self._review_dialog = None
-        self._finish_review(dialog, accepted)
 
     # -- job setup ----------------------------------------------------------
 
@@ -435,6 +467,13 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
 
     def _finish_review(self, dialog, accepted: bool) -> None:
         """React to the review window closing."""
+        pending, self._pending_task = self._pending_task, ""
+        if pending:
+            # The index check offered a clear and fresh upload, confirmed by the
+            # user: keep the engine alive and run the chain now.
+            self._start_task(pending, _("Clearing the OneDrive folder…"))
+            return
+
         if not self._scan_finished:
             # Closed while the scan was still running: stop the worker and let
             # the completion callback do the clean-up.

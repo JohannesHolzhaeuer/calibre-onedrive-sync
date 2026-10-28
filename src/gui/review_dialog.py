@@ -165,7 +165,7 @@ class ReviewDialog(QDialog):
 
     # -- live scan ----------------------------------------------------------
 
-    def start_scanning(self) -> None:
+    def start_scanning(self, message: str = "") -> None:
         """Switch the window into its "scanning" state (Apply disabled)."""
         self._scanning = True
         self._progress_message = ""
@@ -174,7 +174,9 @@ class ReviewDialog(QDialog):
         self.progress.setVisible(True)
         self.select_all_button.setEnabled(False)
         self.select_none_button.setEnabled(False)
-        self.status.setText(_("Scanning OneDrive… the list fills in as books are found."))
+        self.status.setText(
+            message or _("Scanning OneDrive… the list fills in as books are found.")
+        )
         self._refresh_buttons()
 
     def set_progress(self, fraction: float, message: str = "") -> None:

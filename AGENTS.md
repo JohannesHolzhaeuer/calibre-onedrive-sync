@@ -193,15 +193,23 @@ base branch (project) plus coverage of new lines (patch).
   metadata read during the scan resolves files with unusual names; one book is
   assigned at most one remote item, and further copies are offered for deletion.
 - The toolbar click flow in `gui/action.py` is: `_settings_for` →
-  `_prepare_engine` → `_configured_folder` (use the stored folder; `_pick_and_check`
-  → `_pick_folder` → `_remember_folder` only when none is stored) → `_check_index`
-  (`start_index_job` runs `SyncEngine.index_available()` off the GUI thread) →
-  `_on_index_checked`. An index opens the review window (`_open_review`);
-  otherwise `_offer_fresh_upload` asks once and, on *Yes*, sets
-  `_next_task = "upload_all"` and starts `clear_backup`. `_on_task_done` keeps the
-  engine/state alive and chains the follow-up only when the first task neither
-  failed nor was cancelled. A Graph 404 during the check means the stored folder
-  is gone: `_reselect_folder` asks for a new one and continues the flow.
+  `_prepare_engine` → `_ensure_folder` (the stored folder is used as-is;
+  `_pick_folder` → `_remember_folder` only when none is stored) → `_open_window`
+  (the review window is shown **first**, so every later step is visible) →
+  `_check_index` (`start_index_job` runs `SyncEngine.index_available()` off the
+  GUI thread) → `_on_index_checked`. An index starts the scan into the open
+  window; otherwise `_offer_fresh_upload` asks once, parented to that window, and
+  on *Yes* sets `_pending_task = "clear_backup"` plus `_next_task = "upload_all"`
+  and closes the window — `_finish_review` then starts the chain. `_on_task_done`
+  keeps the engine/state alive and chains the follow-up only when the first task
+  neither failed nor was cancelled. A Graph 404 during the check means the stored
+  folder is gone: `_reselect_folder` asks for a new one and reopens the window.
+- Listing is streamed: `GraphClient.list_children(..., on_page=...)` reports every
+  Graph page, `SyncEngine.scan` turns each page into a `listing` plan snapshot and
+  raises `CancelledError` from the page callback, so closing the window stops a
+  scan of a huge folder. `SyncEngine._load_index_by_path` reads the index file
+  through `graph.download_path` in one request — a folder with thousands of files
+  is never listed just to find it.
 - The review window's bulk buttons map to engine methods through `TaskJob`:
   `upload_all` (uploads missing books, links existing files, writes the index),
   `download_all` (imports every not-yet-imported ebook and deliberately keeps

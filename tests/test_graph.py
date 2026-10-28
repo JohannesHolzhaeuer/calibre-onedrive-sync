@@ -337,3 +337,138 @@ def test_drive_from_json_without_owner():
     drive = drive_from_json({"id": "d", "name": "n"})
     assert drive.owner == ""
     assert os.path.basename("a.epub") == "a.epub"
+
+
+# -- transient network failures ---------------------------------------------
+
+
+def test_a_stalled_read_is_retried():
+    sleeps = []
+    state = {"calls": 0}
+
+    def handler(_method, _url, _kwargs):
+        state["calls"] += 1
+        if state["calls"] < 3:
+            raise HttpError(0, "The read operation timed out")
+        return {"id": "i", "name": "ebook", "folder": {}}
+
+    graph_client, _auth = client(handler, sleep=sleeps.append)
+    item = graph_client.get_item("d", "i")
+
+    assert item.name == "ebook"
+    assert state["calls"] == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_retries_are_bounded_and_reported():
+    sleeps = []
+
+    def handler(_method, _url, _kwargs):
+        raise HttpError(0, "connection reset")
+
+    graph_client, _auth = client(handler, sleep=sleeps.append)
+    with pytest.raises(GraphError) as caught:
+        graph_client.get_item("d", "i")
+
+    assert caught.value.status == 0
+    assert sleeps == [1.0, 2.0]
+
+
+def test_uploads_are_not_retried():
+    state = {"calls": 0}
+
+    def handler(_method, _url, _kwargs):
+        state["calls"] += 1
+        raise HttpError(0, "The read operation timed out")
+
+    graph_client, _auth = client(handler, sleep=lambda _seconds: None)
+    with pytest.raises(GraphError):
+        graph_client.post("/me/drive", {})
+
+    assert state["calls"] == 1
+
+
+def test_reads_get_the_long_graph_timeout():
+    graph_client, _auth = client(lambda *_args: {"value": []})
+    graph_client.list_children("d", "i")
+    assert graph_client._transport.calls[0]["timeout"] == graph.GRAPH_TIMEOUT
+
+
+def test_download_retries_a_stalled_stream(tmp_path):
+    sleeps = []
+    state = {"calls": 0}
+
+    def downloader(_url, _path, **_kwargs):
+        state["calls"] += 1
+        if state["calls"] < 3:
+            raise HttpError(0, "The read operation timed out")
+
+    graph_client = GraphClient(
+        FakeAuth(),
+        downloader=downloader,
+        sleep=sleeps.append,
+    )
+    graph_client.download("d", "i", str(tmp_path / "book.epub"))
+
+    assert state["calls"] == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_get_item_by_path_addresses_the_root(tmp_path):
+    graph_client, _auth = client(lambda *_args: {"id": "i", "name": "index.json", "file": {}})
+    graph_client.get_item_by_path("d", "/data/ebook/calibre-onedrive-index.json")
+    assert graph_client._transport.calls[0]["url"].endswith(
+        "/drives/d/root:/data/ebook/calibre-onedrive-index.json:"
+    )
+
+
+def test_a_path_without_a_leading_slash_becomes_absolute():
+    graph_client, _auth = client(lambda *_args: {"id": "i", "name": "index.json", "file": {}})
+    graph_client.get_item_by_path("d", "Books/index.json")
+    assert "/root:/Books/index.json:" in graph_client._transport.calls[0]["url"]
+
+
+def test_download_reports_a_server_error(tmp_path):
+    def downloader(_url, _path, **_kwargs):
+        raise HttpError(500, b"server exploded")
+
+    graph_client = GraphClient(FakeAuth(), downloader=downloader)
+    with pytest.raises(GraphError) as caught:
+        graph_client.download("d", "i", str(tmp_path / "book.epub"))
+
+    assert caught.value.status == 500
+
+
+def test_download_path_streams_the_root_content(tmp_path):
+    calls = []
+    graph_client = GraphClient(
+        FakeAuth(),
+        transport=Transport(lambda *_args: {}),
+        downloader=lambda url, path, **kwargs: calls.append((url, path, kwargs)),
+    )
+    graph_client.download_path("d", "/Books/index.json", str(tmp_path / "index.json"))
+
+    assert calls[0][0].endswith("/drives/d/root:/Books/index.json:/content")
+    assert calls[0][2]["timeout"] == graph.GRAPH_TIMEOUT
+
+
+def test_list_children_reports_every_page():
+    pages = [
+        {
+            "value": [
+                {"id": "1", "name": "a.epub", "file": {}, "parentReference": {"driveId": "d"}}
+            ],
+            "@odata.nextLink": "https://graph.microsoft.com/v1.0/next",
+        },
+        {"value": [{"id": "2", "name": "b.epub", "file": {}, "parentReference": {"driveId": "d"}}]},
+    ]
+
+    def handler(_method, url, _kwargs):
+        return pages[0] if "next" not in url else pages[1]
+
+    seen = []
+    graph_client, _auth = client(handler)
+    children = graph_client.list_children("d", "i", on_page=seen.append)
+
+    assert [child.name for child in children] == ["a.epub", "b.epub"]
+    assert [[child.name for child in page] for page in seen] == [["a.epub"], ["b.epub"]]
