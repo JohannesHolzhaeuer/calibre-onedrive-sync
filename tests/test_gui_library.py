@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 import types
 
-from onedrive_sync.gui.library import CalibreLibrary, add_book_to_library
+from onedrive_sync.gui.library import CalibreLibrary, add_book_to_library, read_metadata
 
 
 class FakeApi:
@@ -16,6 +16,8 @@ class FakeApi:
         self.raise_path = False
         self.added = []
         self.add_result = [7]
+        self.identifiers_calls = []
+        self.field_calls = []
 
     def all_book_ids(self):
         return self.books
@@ -32,6 +34,15 @@ class FakeApi:
     def add_books(self, records, add_duplicates=True):
         self.added.append((records, add_duplicates))
         return self.add_result, []
+
+    def set_identifiers(self, book_id, identifiers):
+        self.identifiers_calls.append((book_id, dict(identifiers)))
+        self.fields[("identifiers", book_id)] = dict(identifiers)
+
+    def set_field(self, name, values):
+        self.field_calls.append((name, dict(values)))
+        for book_id, value in values.items():
+            self.fields[(name, book_id)] = value
 
 
 class FakeData:
@@ -158,13 +169,92 @@ def test_library_stat_failure(monkeypatch, tmp_path):
 
 def install_metadata_shim(monkeypatch):
     module = types.ModuleType("calibre.ebooks.metadata.meta")
-    module.get_metadata = lambda stream, fmt: {"title": "Book", "fmt": fmt}
+    module.get_metadata = lambda stream, fmt: {
+        "title": "Book",
+        "authors": ["Author", "Two"],
+        "fmt": fmt,
+    }
     package = types.ModuleType("calibre.ebooks")
     metadata = types.ModuleType("calibre.ebooks.metadata")
     metadata.meta = module
     monkeypatch.setitem(sys.modules, "calibre.ebooks", package)
     monkeypatch.setitem(sys.modules, "calibre.ebooks.metadata", metadata)
     monkeypatch.setitem(sys.modules, "calibre.ebooks.metadata.meta", module)
+
+
+def test_library_identifiers_and_set_identifier():
+    gui = FakeGui()
+    api = gui.current_db.new_api
+    api.fields[("identifiers", 1)] = {"isbn": "123", "onedrive": "item"}
+    library = CalibreLibrary(gui)
+    assert library.identifiers(1) == {"isbn": "123", "onedrive": "item"}
+    assert library.identifiers(2) == {}
+
+    library.set_identifier(1, "onedrive", "https://onedrive.test/book")
+    assert api.identifiers_calls[-1] == (
+        1,
+        {"isbn": "123", "onedrive": "https://onedrive.test/book"},
+    )
+    library.set_identifier(1, "onedrive", "")
+    assert api.identifiers_calls[-1] == (1, {"isbn": "123"})
+
+    api.set_identifiers = None
+    library.set_identifier(2, "onedrive", "item-2")
+    assert api.field_calls[-1] == ("identifiers", {2: {"onedrive": "item-2"}})
+
+    api.set_field = None
+    legacy_calls = []
+    gui.current_db.set_identifiers = lambda book_id, identifiers: legacy_calls.append(
+        (book_id, identifiers)
+    )
+    library.set_identifier(2, "onedrive", "item-3")
+    assert legacy_calls == [(2, {"onedrive": "item-3"})]
+
+
+def test_library_identifiers_accepts_pair_list():
+    gui = FakeGui()
+    gui.current_db.new_api.fields[("identifiers", 1)] = [("isbn", "1"), ("bad",)]
+    library = CalibreLibrary(gui)
+    assert library.identifiers(1) == {"isbn": "1"}
+
+
+def test_read_metadata(monkeypatch, tmp_path):
+    install_metadata_shim(monkeypatch)
+    path = tmp_path / "book.epub"
+    path.write_bytes(b"book")
+    assert read_metadata(str(path), "epub") == ("Book", "Author & Two")
+    assert read_metadata(str(path), "") == ("Book", "Author & Two")
+    assert read_metadata(str(tmp_path / "missing.epub"), "epub") is None
+
+
+def test_read_metadata_without_reader(monkeypatch, tmp_path):
+    path = tmp_path / "book.epub"
+    path.write_bytes(b"book")
+    monkeypatch.delitem(sys.modules, "calibre.ebooks.metadata.meta", raising=False)
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name.startswith("calibre.ebooks.metadata"):
+            raise ImportError("no calibre")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    assert read_metadata(str(path), "epub") is None
+
+
+def test_metadata_title_authors_handles_objects():
+    from onedrive_sync.gui.library import _metadata_title_authors
+
+    class Meta:
+        title = "T"
+        authors = ("A", "")
+
+    assert _metadata_title_authors(Meta()) == ("T", "A")
+    assert _metadata_title_authors(None) == ("", "")
+    assert _metadata_title_authors({"title": "T", "authors": "A"}) == ("T", "A")
 
 
 def test_add_book_to_library(monkeypatch, tmp_path):
@@ -205,3 +295,33 @@ def test_refresh_falls_back_when_incremental_fails(monkeypatch, tmp_path):
     path.write_bytes(b"book")
     add_book_to_library(gui, str(path))
     assert gui._model.refreshed == 1
+
+
+def test_clear_identifier_removes_the_key_from_every_book():
+    gui = FakeGui()
+    api = gui.current_db.new_api
+    api.books = [1, 2, 3]
+    api.fields[("identifiers", 1)] = {"isbn": "1", "onedrive": "item-1"}
+    api.fields[("identifiers", 2)] = {"isbn": "2"}
+    api.fields[("identifiers", 3)] = {"onedrive": "item-3"}
+    library = CalibreLibrary(gui)
+
+    assert library.clear_identifier("onedrive") == 2
+
+    assert api.identifiers_calls == [
+        (1, {"isbn": "1"}),
+        (3, {}),
+    ]
+    assert library.identifiers(1) == {"isbn": "1"}
+    assert library.identifiers(2) == {"isbn": "2"}
+    assert library.identifiers(3) == {}
+
+
+def test_clear_identifier_is_a_no_op_without_matches():
+    gui = FakeGui()
+    api = gui.current_db.new_api
+    api.fields[("identifiers", 1)] = {"isbn": "1"}
+    library = CalibreLibrary(gui)
+
+    assert library.clear_identifier("onedrive") == 0
+    assert api.identifiers_calls == []

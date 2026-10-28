@@ -317,6 +317,12 @@ class _Widget:
     def hide(self) -> None:
         self._shown = False
 
+    def setVisible(self, visible) -> None:
+        self._shown = bool(visible)
+
+    def isVisible(self) -> bool:
+        return bool(getattr(self, "_shown", False))
+
     def update(self) -> None:
         pass
 
@@ -389,6 +395,26 @@ class QLabel(QWidget):
         self._text = text
 
 
+class QProgressBar(QWidget):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._minimum = 0
+        self._maximum = 0
+        self._value = 0
+
+    def setRange(self, minimum, maximum) -> None:
+        self._minimum, self._maximum = int(minimum), int(maximum)
+
+    def range(self) -> tuple[int, int]:
+        return self._minimum, self._maximum
+
+    def setValue(self, value) -> None:
+        self._value = max(self._minimum, min(self._maximum, int(value)))
+
+    def value(self) -> int:
+        return self._value
+
+
 class QSpinBox(QWidget):
     valueChanged = pyqtSignal(int)
 
@@ -418,6 +444,10 @@ class QPushButton(QWidget):
         super().__init__(parent)
         self._text = text
         self._enabled = True
+
+    def click(self) -> None:
+        """Emit ``clicked`` like Qt does for a keyboard/mouse activation."""
+        self.clicked.emit()
 
 
 class QCheckBox(QWidget):
@@ -519,6 +549,8 @@ class QTreeWidgetItem:
         self._data: dict = {}
         self._children: list[QTreeWidgetItem] = []
         self._parent = None
+        self._flags = 0
+        self._check_states: dict[int, int] = {}
         if isinstance(parent, QTreeWidget):
             parent.addTopLevelItem(self)
         elif isinstance(parent, QTreeWidgetItem):
@@ -537,6 +569,21 @@ class QTreeWidgetItem:
 
     def data(self, column, role):
         return self._data.get((column, role))
+
+    def setFlags(self, flags) -> None:
+        self._flags = flags
+
+    def flags(self):
+        return self._flags
+
+    def setCheckState(self, column, state) -> None:
+        self._check_states[column] = state
+
+    def checkState(self, column):
+        return self._check_states.get(column, 0)
+
+    def setToolTip(self, column, text) -> None:
+        self._data[(column, "tooltip")] = str(text)
 
     def addChild(self, child) -> None:
         child._parent = self
@@ -1018,7 +1065,8 @@ class Qt:
     TransformationMode = _Enums(SmoothTransformation=1)
     GlobalColor = _Enums(lightGray=1)
     ItemDataRole = _Enums(UserRole=0x0100)
-    ItemFlag = _Enums(ItemIsEnabled=1, ItemIsSelectable=2)
+    ItemFlag = _Enums(ItemIsEnabled=1, ItemIsSelectable=2, ItemIsUserCheckable=4)
+    CheckState = _Enums(Unchecked=0, PartiallyChecked=1, Checked=2)
     CursorShape = _Enums(PointingHandCursor=1)
     PenCapStyle = _Enums(RoundCap=1)
     TextInteractionFlag = _Enums(TextSelectableByMouse=1)

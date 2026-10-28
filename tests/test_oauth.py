@@ -86,6 +86,28 @@ def test_start_device_code_maps_http_error():
         start_device_code("client", transport=transport)
 
 
+def test_start_device_code_retries_a_transport_error():
+    transport = QueueTransport(
+        HttpError(0, "connection reset"),
+        HttpResponse(
+            200,
+            b'{"device_code":"d","user_code":"U","verification_uri":"https://x"}',
+        ),
+    )
+    sleeps = []
+    code = start_device_code("client", transport=transport, sleep=sleeps.append)
+    assert code.user_code == "U"
+    assert len(transport.calls) == 2
+    assert sleeps == [1.0]
+
+
+def test_start_device_code_gives_up_after_transport_errors():
+    transport = QueueTransport(*[HttpError(0, "connection reset")] * 3)
+    with pytest.raises(AuthError, match="Could not reach"):
+        start_device_code("client", transport=transport, sleep=lambda _seconds: None)
+    assert len(transport.calls) == 3
+
+
 def test_token_from_response_requires_access_token():
     with pytest.raises(AuthError):
         _token_from_response({})
@@ -154,6 +176,37 @@ def test_poll_device_code_unknown_error():
         poll_device_code("client", device_code(), transport=transport, clock=lambda: 0)
 
 
+def test_poll_device_code_retries_a_transport_error():
+    transport = QueueTransport(
+        HttpError(0, "connection reset"),
+        token_response(),
+    )
+    sleeps = []
+    token = poll_device_code(
+        "client",
+        device_code(),
+        transport=transport,
+        sleep=sleeps.append,
+        clock=lambda: 0,
+    )
+    assert token.access_token == "access"
+    assert sleeps == [1]
+    assert len(transport.calls) == 2
+
+
+def test_poll_device_code_gives_up_after_transport_errors():
+    transport = QueueTransport(*[HttpError(0, "connection reset")] * oauth.TRANSPORT_RETRY_LIMIT)
+    with pytest.raises(AuthError, match="Could not reach"):
+        poll_device_code(
+            "client",
+            device_code(),
+            transport=transport,
+            sleep=lambda _seconds: None,
+            clock=lambda: 0,
+        )
+    assert len(transport.calls) == oauth.TRANSPORT_RETRY_LIMIT
+
+
 def test_poll_device_code_honours_deadline():
     transport = QueueTransport()
     ticks = iter([0, 5])
@@ -210,6 +263,15 @@ def test_refresh_access_token_other_error():
     transport = QueueTransport(HttpError(400, '{"error":"bad","error_description":"broken"}'))
     with pytest.raises(AuthError, match="broken"):
         refresh_access_token("client", "refresh", transport=transport)
+
+
+def test_refresh_access_token_retries_a_transport_error():
+    transport = QueueTransport(HttpError(0, "connection reset"), token_response())
+    sleeps = []
+    token = refresh_access_token("client", "refresh", transport=transport, sleep=sleeps.append)
+    assert token.access_token == "access"
+    assert len(transport.calls) == 2
+    assert sleeps == [1.0]
 
 
 def test_default_app_uses_consumers_tenant():

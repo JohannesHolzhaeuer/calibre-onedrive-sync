@@ -86,6 +86,26 @@ def test_drive_and_item_parsing():
     folder = remote_from_json({"id": "f", "name": "folder", "folder": {}}, "d")
     assert folder.extension == ""
 
+    linked = remote_from_json(
+        {"id": "y", "name": "y.epub", "file": {}, "webUrl": "https://onedrive.test/y"},
+        "d",
+    )
+    assert linked.web_url == "https://onedrive.test/y"
+    shortcut_web = remote_from_json(
+        {
+            "id": "s",
+            "name": "shortcut",
+            "remoteItem": {
+                "id": "z",
+                "name": "z.epub",
+                "file": {},
+                "webUrl": "https://onedrive.test/z",
+            },
+        },
+        "d",
+    )
+    assert shortcut_web.web_url == "https://onedrive.test/z"
+
 
 def test_get_me_and_own_drive_only():
     urls = []
@@ -159,88 +179,6 @@ def test_get_item_and_root():
     assert graph_client.get_root_item("d").id == "root"
 
 
-def test_ensure_folder_returns_existing():
-    graph_client, _auth = client(
-        lambda *_args: {"value": [{"id": "f", "name": "Export", "folder": {}}]}
-    )
-    folder = graph_client.ensure_folder("d", "parent", "Export")
-    assert folder.id == "f"
-
-
-def test_ensure_folder_creates_missing():
-    def handler(method, url, _kwargs):
-        if method == "POST":
-            return {"id": "new", "name": "Export", "folder": {}}
-        return {"value": []}
-
-    graph_client, _auth = client(handler)
-    folder = graph_client.ensure_folder("d", "parent", "Export")
-    assert folder.id == "new"
-
-
-def test_ensure_folder_handles_conflict():
-    state = {"calls": 0}
-
-    def handler(method, url, _kwargs):
-        state["calls"] += 1
-        if method == "POST":
-            return HttpError(409, b"conflict")
-        if state["calls"] == 1:
-            return {"value": []}
-        return {"value": [{"id": "f", "name": "Export", "folder": {}}]}
-
-    graph_client, _auth = client(handler)
-    folder = graph_client.ensure_folder("d", "parent", "Export")
-    assert folder.id == "f"
-
-
-def test_ensure_folder_reraises_unexpected_error():
-    def handler(method, url, _kwargs):
-        if method == "POST":
-            return HttpError(500, b"boom")
-        return {"value": []}
-
-    graph_client, _auth = client(handler)
-    with pytest.raises(GraphError) as exc:
-        graph_client.ensure_folder("d", "parent", "Export")
-    assert exc.value.status == 500
-
-
-def test_list_recursive_skips_configured_folder():
-    def handler(method, url, _kwargs):
-        if url.endswith("/root/children"):
-            return {
-                "value": [
-                    {"id": "keep", "name": "keep.epub", "file": {}},
-                    {"id": "skip", "name": "skip", "folder": {}},
-                    {"id": "gone", "name": "gone.epub", "deleted": {}},
-                ]
-            }
-        return {"value": []}
-
-    graph_client, _auth = client(handler)
-    files = graph_client.list_recursive("d", None, skip_folder_id="skip")
-    assert [item.name for item in files] == ["keep.epub"]
-
-
-def test_delta_returns_items_and_link():
-    def handler(method, url, _kwargs):
-        if "@odata.deltaLink" in url or url.endswith("/delta") or url.endswith("delta-link"):
-            return {
-                "value": [{"id": "a", "name": "a.epub", "file": {}}],
-                "@odata.deltaLink": "delta-link",
-            }
-        return {"value": []}
-
-    graph_client, _auth = client(handler)
-    items, link = graph_client.delta("d", "folder")
-    assert [item.id for item in items] == ["a"]
-    assert link == "delta-link"
-
-    items, link = graph_client.delta("d", "folder", "https://graph.test/delta-link")
-    assert link == "delta-link"
-
-
 def test_download_uses_downloader(tmp_path):
     calls = []
     auth = FakeAuth()
@@ -271,6 +209,14 @@ def test_download_retries_after_401(tmp_path):
     assert auth.invalidated == 1
     assert auth.forced == 1
     assert headers[0]["Authorization"] == "Bearer token"
+
+
+def test_delete_item_uses_item_endpoint():
+    transport = Transport(lambda *_args: {})
+    graph_client = GraphClient(FakeAuth(), transport=transport)
+    graph_client.delete_item("drive", "item")
+    assert transport.calls[0]["method"] == "DELETE"
+    assert transport.calls[0]["url"].endswith("/drives/drive/items/item")
 
 
 def test_upload_simple(tmp_path):
@@ -391,3 +337,149 @@ def test_drive_from_json_without_owner():
     drive = drive_from_json({"id": "d", "name": "n"})
     assert drive.owner == ""
     assert os.path.basename("a.epub") == "a.epub"
+
+
+# -- transient network failures ---------------------------------------------
+
+
+def test_a_stalled_read_is_retried():
+    sleeps = []
+    state = {"calls": 0}
+
+    def handler(_method, _url, _kwargs):
+        state["calls"] += 1
+        if state["calls"] < 3:
+            raise HttpError(0, "The read operation timed out")
+        return {"id": "i", "name": "ebook", "folder": {}}
+
+    graph_client, _auth = client(handler, sleep=sleeps.append)
+    item = graph_client.get_item("d", "i")
+
+    assert item.name == "ebook"
+    assert state["calls"] == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_retries_are_bounded_and_reported():
+    sleeps = []
+
+    def handler(_method, _url, _kwargs):
+        raise HttpError(0, "connection reset")
+
+    graph_client, _auth = client(handler, sleep=sleeps.append)
+    with pytest.raises(GraphError) as caught:
+        graph_client.get_item("d", "i")
+
+    assert caught.value.status == 0
+    assert sleeps == [1.0, 2.0]
+
+
+def test_uploads_are_not_retried():
+    state = {"calls": 0}
+
+    def handler(_method, _url, _kwargs):
+        state["calls"] += 1
+        raise HttpError(0, "The read operation timed out")
+
+    graph_client, _auth = client(handler, sleep=lambda _seconds: None)
+    with pytest.raises(GraphError):
+        graph_client.post("/me/drive", {})
+
+    assert state["calls"] == 1
+
+
+def test_reads_get_the_long_graph_timeout():
+    graph_client, _auth = client(lambda *_args: {"value": []})
+    graph_client.list_children("d", "i")
+    assert graph_client._transport.calls[0]["timeout"] == graph.GRAPH_TIMEOUT
+
+
+def test_download_retries_a_stalled_stream(tmp_path):
+    sleeps = []
+    state = {"calls": 0}
+
+    def downloader(_url, _path, **_kwargs):
+        state["calls"] += 1
+        if state["calls"] < 3:
+            raise HttpError(0, "The read operation timed out")
+
+    graph_client = GraphClient(
+        FakeAuth(),
+        downloader=downloader,
+        sleep=sleeps.append,
+    )
+    graph_client.download("d", "i", str(tmp_path / "book.epub"))
+
+    assert state["calls"] == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_get_item_by_path_addresses_the_root(tmp_path):
+    graph_client, _auth = client(lambda *_args: {"id": "i", "name": "index.json", "file": {}})
+    graph_client.get_item_by_path("d", "/data/ebook/calibre-onedrive-index.json")
+    assert graph_client._transport.calls[0]["url"].endswith(
+        "/drives/d/root:/data/ebook/calibre-onedrive-index.json:"
+    )
+
+
+def test_a_path_without_a_leading_slash_becomes_absolute():
+    graph_client, _auth = client(lambda *_args: {"id": "i", "name": "index.json", "file": {}})
+    graph_client.get_item_by_path("d", "Books/index.json")
+    assert "/root:/Books/index.json:" in graph_client._transport.calls[0]["url"]
+
+
+def test_a_path_with_spaces_is_percent_encoded():
+    graph_client, _auth = client(lambda *_args: {"id": "i", "name": "book.epub", "file": {}})
+    graph_client.get_item_by_path("d", "/data/ebook/A Author - Buch (German Edition).epub")
+    url = graph_client._transport.calls[0]["url"]
+
+    assert " " not in url
+    assert "%20" in url
+    assert "/root:/data/ebook/" in url
+    assert url.endswith(".epub:")
+
+
+def test_download_reports_a_server_error(tmp_path):
+    def downloader(_url, _path, **_kwargs):
+        raise HttpError(500, b"server exploded")
+
+    graph_client = GraphClient(FakeAuth(), downloader=downloader)
+    with pytest.raises(GraphError) as caught:
+        graph_client.download("d", "i", str(tmp_path / "book.epub"))
+
+    assert caught.value.status == 500
+
+
+def test_download_path_streams_the_root_content(tmp_path):
+    calls = []
+    graph_client = GraphClient(
+        FakeAuth(),
+        transport=Transport(lambda *_args: {}),
+        downloader=lambda url, path, **kwargs: calls.append((url, path, kwargs)),
+    )
+    graph_client.download_path("d", "/Books/index.json", str(tmp_path / "index.json"))
+
+    assert calls[0][0].endswith("/drives/d/root:/Books/index.json:/content")
+    assert calls[0][2]["timeout"] == graph.GRAPH_TIMEOUT
+
+
+def test_list_children_reports_every_page():
+    pages = [
+        {
+            "value": [
+                {"id": "1", "name": "a.epub", "file": {}, "parentReference": {"driveId": "d"}}
+            ],
+            "@odata.nextLink": "https://graph.microsoft.com/v1.0/next",
+        },
+        {"value": [{"id": "2", "name": "b.epub", "file": {}, "parentReference": {"driveId": "d"}}]},
+    ]
+
+    def handler(_method, url, _kwargs):
+        return pages[0] if "next" not in url else pages[1]
+
+    seen = []
+    graph_client, _auth = client(handler)
+    children = graph_client.list_children("d", "i", on_page=seen.append)
+
+    assert [child.name for child in children] == ["a.epub", "b.epub"]
+    assert [[child.name for child in page] for page in seen] == [["a.epub"], ["b.epub"]]

@@ -50,6 +50,52 @@ class CalibreLibrary:
             return None
         return path, stat.st_mtime, stat.st_size
 
+    def identifiers(self, book_id: int) -> dict[str, str]:
+        """Return the calibre identifier map for ``book_id``."""
+        value = self._field("identifiers", book_id, {})
+        if isinstance(value, dict):
+            return {str(key): str(item) for key, item in value.items() if item}
+        if isinstance(value, (list, tuple)):
+            result: dict[str, str] = {}
+            for item in value:
+                if isinstance(item, (list, tuple)) and len(item) == 2 and item[1]:
+                    result[str(item[0])] = str(item[1])
+            return result
+        return {}
+
+    def set_identifier(self, book_id: int, key: str, value: str) -> None:
+        """Write one calibre identifier (e.g. the OneDrive link) for a book."""
+        book_id = int(book_id)
+        identifiers = self.identifiers(book_id)
+        if value:
+            identifiers[str(key)] = str(value)
+        else:
+            identifiers.pop(str(key), None)
+
+        setter = getattr(self.api, "set_identifiers", None)
+        if callable(setter):
+            setter(book_id, identifiers)
+            return
+        set_field = getattr(self.api, "set_field", None)
+        if callable(set_field):
+            set_field("identifiers", {book_id: identifiers})
+            return
+        legacy = getattr(self.gui.current_db, "set_identifiers", None)
+        if callable(legacy):
+            legacy(book_id, identifiers)
+            return
+        log.debug("This calibre version cannot store identifiers; link kept in state only")
+
+    def clear_identifier(self, key: str) -> int:
+        """Remove ``key`` from every book; returns how many were changed."""
+        cleared = 0
+        for book_id in self.all_books():
+            if key not in self.identifiers(book_id):
+                continue
+            self.set_identifier(book_id, key, "")
+            cleared += 1
+        return cleared
+
     def _field(self, name: str, book_id: int, default):
         try:
             return self.api.field_for(name, int(book_id), default_value=default)
@@ -93,6 +139,43 @@ def add_book_to_library(gui, path: str) -> int | None:
     ids = [int(book_id) for book_id in ids or []]
     _refresh_library_view(gui, ids)
     return ids[0] if ids else None
+
+
+def read_metadata(path: str, fmt: str) -> tuple[str, str] | None:
+    """Read ``(title, authors)`` embedded in a downloaded EPUB/PDF file.
+
+    Used by the review scan to recognise remote books whose filenames do not
+    follow the calibre export convention. The file is a temporary download and
+    is discarded afterwards; nothing is added to the library here.
+    """
+    fmt = str(fmt or os.path.splitext(path)[1]).lstrip(".").lower()
+    if not fmt:
+        return None
+    try:
+        from calibre.ebooks.metadata.meta import get_metadata
+    except Exception:  # noqa: BLE001 - headless/test environment
+        return None
+    try:
+        with open(path, "rb") as stream:
+            metadata = get_metadata(stream, fmt)
+    except Exception:  # noqa: BLE001 - a broken book must not fail the scan
+        log.debug("Could not read metadata from %s", path, exc_info=True)
+        return None
+    return _metadata_title_authors(metadata)
+
+
+def _metadata_title_authors(metadata) -> tuple[str, str]:
+    if metadata is None:
+        return "", ""
+    if isinstance(metadata, dict):
+        title = metadata.get("title", "")
+        authors = metadata.get("authors", "")
+    else:
+        title = getattr(metadata, "title", "")
+        authors = getattr(metadata, "authors", "")
+    if isinstance(authors, (list, tuple)):
+        authors = " & ".join(str(author) for author in authors if author)
+    return str(title or ""), str(authors or "")
 
 
 def _refresh_library_view(gui, ids: list[int]) -> None:
