@@ -133,13 +133,34 @@ class FolderPickerDialog(QDialog):
         self.summary.setText(name)
         self.status.setText("")
 
+        current = self._initial_node()
+        if current is not None:
+            self.tree.addTopLevelItem(current)
+            self.tree.setCurrentItem(current)
+
         root = QTreeWidgetItem([name])
         root.setData(0, Qt.ItemDataRole.UserRole, FolderRef(self._drive.id, "", name, "/"))
         root.addChild(QTreeWidgetItem([_("Loading…")]))
         self.tree.addTopLevelItem(root)
-        self.tree.setCurrentItem(root)
+        if current is None:
+            self.tree.setCurrentItem(root)
         self._load_children(root, None)
         self.tree.expandItem(root)
+
+    def _initial_node(self) -> QTreeWidgetItem | None:
+        """A one-click entry for the folder that is currently configured."""
+        initial = self.initial
+        if initial is None or not initial.item_id or self._drive is None:
+            return None
+        folder = FolderRef(
+            drive_id=initial.drive_id or self._drive.id,
+            item_id=initial.item_id,
+            name=initial.name,
+            path=initial.path,
+        )
+        node = QTreeWidgetItem([_("Current folder: {path}").format(path=folder.display())])
+        node.setData(0, Qt.ItemDataRole.UserRole, folder)
+        return node
 
     def _load_children(self, item: QTreeWidgetItem, folder_id: str | None) -> None:
         if self._drive is None:

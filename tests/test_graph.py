@@ -86,6 +86,26 @@ def test_drive_and_item_parsing():
     folder = remote_from_json({"id": "f", "name": "folder", "folder": {}}, "d")
     assert folder.extension == ""
 
+    linked = remote_from_json(
+        {"id": "y", "name": "y.epub", "file": {}, "webUrl": "https://onedrive.test/y"},
+        "d",
+    )
+    assert linked.web_url == "https://onedrive.test/y"
+    shortcut_web = remote_from_json(
+        {
+            "id": "s",
+            "name": "shortcut",
+            "remoteItem": {
+                "id": "z",
+                "name": "z.epub",
+                "file": {},
+                "webUrl": "https://onedrive.test/z",
+            },
+        },
+        "d",
+    )
+    assert shortcut_web.web_url == "https://onedrive.test/z"
+
 
 def test_get_me_and_own_drive_only():
     urls = []
@@ -159,88 +179,6 @@ def test_get_item_and_root():
     assert graph_client.get_root_item("d").id == "root"
 
 
-def test_ensure_folder_returns_existing():
-    graph_client, _auth = client(
-        lambda *_args: {"value": [{"id": "f", "name": "Export", "folder": {}}]}
-    )
-    folder = graph_client.ensure_folder("d", "parent", "Export")
-    assert folder.id == "f"
-
-
-def test_ensure_folder_creates_missing():
-    def handler(method, url, _kwargs):
-        if method == "POST":
-            return {"id": "new", "name": "Export", "folder": {}}
-        return {"value": []}
-
-    graph_client, _auth = client(handler)
-    folder = graph_client.ensure_folder("d", "parent", "Export")
-    assert folder.id == "new"
-
-
-def test_ensure_folder_handles_conflict():
-    state = {"calls": 0}
-
-    def handler(method, url, _kwargs):
-        state["calls"] += 1
-        if method == "POST":
-            return HttpError(409, b"conflict")
-        if state["calls"] == 1:
-            return {"value": []}
-        return {"value": [{"id": "f", "name": "Export", "folder": {}}]}
-
-    graph_client, _auth = client(handler)
-    folder = graph_client.ensure_folder("d", "parent", "Export")
-    assert folder.id == "f"
-
-
-def test_ensure_folder_reraises_unexpected_error():
-    def handler(method, url, _kwargs):
-        if method == "POST":
-            return HttpError(500, b"boom")
-        return {"value": []}
-
-    graph_client, _auth = client(handler)
-    with pytest.raises(GraphError) as exc:
-        graph_client.ensure_folder("d", "parent", "Export")
-    assert exc.value.status == 500
-
-
-def test_list_recursive_skips_configured_folder():
-    def handler(method, url, _kwargs):
-        if url.endswith("/root/children"):
-            return {
-                "value": [
-                    {"id": "keep", "name": "keep.epub", "file": {}},
-                    {"id": "skip", "name": "skip", "folder": {}},
-                    {"id": "gone", "name": "gone.epub", "deleted": {}},
-                ]
-            }
-        return {"value": []}
-
-    graph_client, _auth = client(handler)
-    files = graph_client.list_recursive("d", None, skip_folder_id="skip")
-    assert [item.name for item in files] == ["keep.epub"]
-
-
-def test_delta_returns_items_and_link():
-    def handler(method, url, _kwargs):
-        if "@odata.deltaLink" in url or url.endswith("/delta") or url.endswith("delta-link"):
-            return {
-                "value": [{"id": "a", "name": "a.epub", "file": {}}],
-                "@odata.deltaLink": "delta-link",
-            }
-        return {"value": []}
-
-    graph_client, _auth = client(handler)
-    items, link = graph_client.delta("d", "folder")
-    assert [item.id for item in items] == ["a"]
-    assert link == "delta-link"
-
-    items, link = graph_client.delta("d", "folder", "https://graph.test/delta-link")
-    assert link == "delta-link"
-
-
 def test_download_uses_downloader(tmp_path):
     calls = []
     auth = FakeAuth()
@@ -271,6 +209,14 @@ def test_download_retries_after_401(tmp_path):
     assert auth.invalidated == 1
     assert auth.forced == 1
     assert headers[0]["Authorization"] == "Bearer token"
+
+
+def test_delete_item_uses_item_endpoint():
+    transport = Transport(lambda *_args: {})
+    graph_client = GraphClient(FakeAuth(), transport=transport)
+    graph_client.delete_item("drive", "item")
+    assert transport.calls[0]["method"] == "DELETE"
+    assert transport.calls[0]["url"].endswith("/drives/drive/items/item")
 
 
 def test_upload_simple(tmp_path):

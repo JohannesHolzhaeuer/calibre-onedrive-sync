@@ -34,3 +34,7 @@ class GraphError(OneDriveError):
 
 class SyncError(OneDriveError):
     """The sync engine could not complete a step."""
+
+
+class CancelledError(OneDriveError):
+    """The user cancelled a long-running sync/review operation."""

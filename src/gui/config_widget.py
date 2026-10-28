@@ -16,7 +16,6 @@ from qt.core import (
     QLabel,
     QLineEdit,
     QPushButton,
-    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -25,8 +24,6 @@ from ..common.auth import AuthManager
 from ..common.config import (
     DEFAULT_EXPORT_FORMAT,
     EXPORT_FORMATS,
-    MAX_SYNC_INTERVAL,
-    MIN_SYNC_INTERVAL,
     ConfigTokenStore,
     Settings,
     clear_refresh_token,
@@ -37,7 +34,6 @@ from ..common.config import (
 from ..common.graph import GraphClient
 from ..common.i18n import _
 from ..common.models import FolderRef
-from ..common.sync import normalize_export_subfolder
 from .auth_dialog import sign_in
 from .folder_picker import open_folder_picker
 
@@ -92,17 +88,16 @@ class ConfigWidget(QWidget):
         folder_row.addWidget(self.choose_folder_button)
         layout.addLayout(folder_row)
 
-        layout.addWidget(QLabel(_("Export subfolder")))
-        self.export_subfolder = QLineEdit()
-        self.export_subfolder.setPlaceholderText(_("Calibre Export"))
-        self.export_subfolder.textChanged.connect(self._update_preview)
-        layout.addWidget(self.export_subfolder)
-
-        self.export_directly = QCheckBox(
-            _("Export directly into the selected folder (no subfolder)")
+        footer = QLabel(
+            _(
+                "Everything is manual: the toolbar button lets you pick a folder, "
+                "checks for a calibre index and then opens the review window. "
+                "Books are uploaded directly into the selected folder; subfolders "
+                "are never read."
+            )
         )
-        self.export_directly.toggled.connect(self._on_export_directly_toggled)
-        layout.addWidget(self.export_directly)
+        footer.setWordWrap(True)
+        layout.addWidget(footer)
 
         layout.addWidget(QLabel(_("Export format")))
         self.export_format = QComboBox()
@@ -114,23 +109,6 @@ class ConfigWidget(QWidget):
         for value in EXPORT_FORMATS:
             self.export_format.addItem(labels.get(value, value), value)
         layout.addWidget(self.export_format)
-
-        self.import_enabled = QCheckBox(_("Import new books from OneDrive"))
-        layout.addWidget(self.import_enabled)
-        self.export_enabled = QCheckBox(_("Export books that are not in OneDrive yet"))
-        layout.addWidget(self.export_enabled)
-
-        self.auto_sync = QCheckBox(_("Sync automatically when the library or OneDrive changes"))
-        layout.addWidget(self.auto_sync)
-
-        interval_row = QHBoxLayout()
-        interval_row.addWidget(QLabel(_("Check for changes every")))
-        self.interval = QSpinBox()
-        self.interval.setRange(MIN_SYNC_INTERVAL, MAX_SYNC_INTERVAL)
-        self.interval.setSuffix(_(" min"))
-        interval_row.addWidget(self.interval)
-        interval_row.addStretch(1)
-        layout.addLayout(interval_row)
 
         self.debug = QCheckBox(_("Debug (verbose logging)"))
         layout.addWidget(self.debug)
@@ -161,13 +139,6 @@ class ConfigWidget(QWidget):
             self._folder = None
         index = self.export_format.findData(settings.export_format or DEFAULT_EXPORT_FORMAT)
         self.export_format.setCurrentIndex(index if index >= 0 else 0)
-        self.export_subfolder.setText(settings.export_subfolder)
-        self.export_directly.setChecked(settings.export_directly)
-        self._on_export_directly_toggled(settings.export_directly)
-        self.import_enabled.setChecked(settings.import_enabled)
-        self.export_enabled.setChecked(settings.export_enabled)
-        self.auto_sync.setChecked(settings.auto_sync)
-        self.interval.setValue(settings.sync_interval_minutes)
         self.debug.setChecked(settings.debug)
         self._refresh_auth_status()
         self._refresh_folder_label()
@@ -184,13 +155,7 @@ class ConfigWidget(QWidget):
             "folder_id": folder.item_id if folder else "",
             "folder_path": folder.path if folder else "",
             "folder_name": folder.name if folder else "",
-            "export_subfolder": normalize_export_subfolder(self.export_subfolder.text()),
-            "export_directly": self.export_directly.isChecked(),
             "export_format": self.export_format.currentData() or DEFAULT_EXPORT_FORMAT,
-            "import_enabled": self.import_enabled.isChecked(),
-            "export_enabled": self.export_enabled.isChecked(),
-            "auto_sync": self.auto_sync.isChecked(),
-            "sync_interval_minutes": self.interval.value(),
             "debug": self.debug.isChecked(),
         }
 
@@ -208,10 +173,6 @@ class ConfigWidget(QWidget):
             errors.append(_("Sign in again after changing the Microsoft app (client) ID."))
         if self._folder is None or not self._folder.item_id:
             errors.append(_("Choose the OneDrive folder to sync with."))
-        if not self.import_enabled.isChecked() and not self.export_enabled.isChecked():
-            errors.append(_("Enable importing, exporting, or both."))
-        if not normalize_export_subfolder(self.export_subfolder.text()):
-            errors.append(_("Enter a valid export subfolder."))
         if errors:
             self._show_status("\n".join(errors))
             return False
@@ -240,14 +201,24 @@ class ConfigWidget(QWidget):
             self._show_status(_("Sign-in failed: {message}").format(message=exc))
             return
         if not ok:
-            self._show_status(_("Sign-in cancelled."))
+            error = str((profile or {}).get("error") or "")
+            if error:
+                self._show_status(_("Sign-in failed: {message}").format(message=error))
+            else:
+                self._show_status(_("Sign-in cancelled."))
             return
         self._signed_in_client_id = client_id
         self._account_name = str(
             profile.get("displayName") or profile.get("userPrincipalName") or ""
         )
         self._refresh_auth_status()
-        self._show_status(_("Signed in to OneDrive."), ok=True)
+        self._show_status(
+            _(
+                "Signed in to OneDrive. Choose a folder, click OK, and then use the "
+                "toolbar button to review matching books before the first sync."
+            ),
+            ok=True,
+        )
 
     def _on_sign_out(self) -> None:
         clear_refresh_token()
@@ -296,18 +267,12 @@ class ConfigWidget(QWidget):
                 _("OneDrive folder: {path}").format(path=self._folder.display())
             )
 
-    def _on_export_directly_toggled(self, checked: bool) -> None:
-        self.export_subfolder.setEnabled(not checked)
-        self._update_preview()
-
     def _update_preview(self, *_args) -> None:
         if self._folder is None:
             self.preview.setText("")
             return
         path = self._folder.display().rstrip("/")
-        if not self.export_directly.isChecked():
-            path = f"{path}/{normalize_export_subfolder(self.export_subfolder.text())}"
-        self.preview.setText(_("New books are uploaded to: {path}").format(path=path))
+        self.preview.setText(_("Books are uploaded directly to: {path}").format(path=path))
 
     def _show_status(self, message: str, *, ok: bool = False) -> None:
         self.status.setText(message)

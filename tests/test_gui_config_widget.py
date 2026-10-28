@@ -43,35 +43,14 @@ def test_load_and_fields(monkeypatch):
     widget = widget_with(monkeypatch)
     assert widget.client_id.text() == "client"
     assert widget.folder_label.text() == "OneDrive folder: /Books"
-    assert widget.export_subfolder.text() == "Export"
     assert widget.export_format.currentData() == "pdf"
-    assert widget.import_enabled.isChecked()
-    assert widget.export_enabled.isChecked()
-    assert widget.auto_sync.isChecked()
-    assert widget.interval.value() == 30
     assert widget.debug.isChecked()
+    assert widget.preview.text() == "Books are uploaded directly to: /Books"
     fields = widget.fields()
     assert fields["drive_id"] == "drive"
     assert fields["folder_id"] == "folder"
-    assert fields["export_subfolder"] == "Export"
-    assert fields["export_directly"] is False
     assert fields["export_format"] == "pdf"
-
-
-def test_fields_normalize_empty_subfolder(monkeypatch):
-    widget = widget_with(monkeypatch)
-    widget.export_subfolder.setText("")
-    assert widget.fields()["export_subfolder"] == "Calibre Export"
-    assert "Calibre Export" in widget.preview.text()
-
-
-def test_export_directly_disables_subfolder_and_updates_preview(monkeypatch):
-    widget = widget_with(monkeypatch)
-    widget.export_directly.setChecked(True)
-    widget._on_export_directly_toggled(True)
-    assert not widget.export_subfolder.isEnabled()
-    assert widget.fields()["export_directly"] is True
-    assert widget.preview.text() == "New books are uploaded to: /Books"
+    assert "export_subfolder" not in fields
 
 
 def test_load_without_folder_or_token(monkeypatch):
@@ -131,14 +110,11 @@ def test_validate_reports_all_errors(monkeypatch):
         token="",
     )
     widget.client_id.setText("")
-    widget.import_enabled.setChecked(False)
-    widget.export_enabled.setChecked(False)
     assert not widget.validate()
     text = widget.status.text()
     assert "client" in text
     assert "Sign in" in text
     assert "folder" in text
-    assert "Enable importing" in text
 
 
 def test_apply_saves_fields(monkeypatch):
@@ -177,6 +153,21 @@ def test_sign_in_cancelled(monkeypatch):
     )
     widget._on_sign_in()
     assert "cancelled" in widget.status.text()
+
+
+def test_sign_in_shows_the_reported_failure(monkeypatch):
+    widget = widget_with(monkeypatch)
+    monkeypatch.setattr(
+        config_widget,
+        "sign_in",
+        lambda _parent, _auth, profile_loader=None: (
+            False,
+            {"error": "connection reset by peer"},
+        ),
+    )
+    widget._on_sign_in()
+    assert "connection reset by peer" in widget.status.text()
+    assert "cancelled" not in widget.status.text().lower()
 
 
 def test_sign_in_exception(monkeypatch):

@@ -3,8 +3,6 @@
 Supports the pieces the sync needs:
 
 * fetch the signed-in user's drive and list folder children,
-* create/find folders,
-* delta queries for event-based change detection,
 * streamed downloads,
 * simple uploads and chunked upload sessions for large books.
 
@@ -78,6 +76,7 @@ def remote_from_json(data: dict, drive_id: str) -> RemoteItem:
         is_folder=is_folder,
         deleted=data.get("deleted") is not None,
         mime_type=str(file_data.get("mimeType", "")),
+        web_url=str(source.get("webUrl") or data.get("webUrl") or ""),
     )
 
 
@@ -202,90 +201,6 @@ class GraphClient:
             drive_id,
         )
 
-    def ensure_folder(self, drive_id: str, parent_id: str | None, name: str) -> RemoteItem:
-        """Return the child folder ``name``, creating it when missing."""
-        for child in self.list_children(drive_id, parent_id):
-            if child.is_folder and child.name == name:
-                return child
-        try:
-            data = self.post(
-                _children_url(drive_id, parent_id),
-                {
-                    "name": name,
-                    "folder": {},
-                    "@microsoft.graph.conflictBehavior": "fail",
-                },
-            )
-            return remote_from_json(data, drive_id)
-        except GraphError as exc:
-            if exc.status != 409:
-                raise
-            for child in self.list_children(drive_id, parent_id):
-                if child.is_folder and child.name == name:
-                    return child
-            raise
-
-    def list_recursive(
-        self,
-        drive_id: str,
-        folder_id: str | None,
-        *,
-        skip_folder_id: str | None = None,
-    ) -> list[RemoteItem]:
-        """Recursively list files below ``folder_id`` (folders are not returned)."""
-        files: list[RemoteItem] = []
-        queue: list[tuple[str, str | None]] = [(drive_id, folder_id)]
-        seen = set()
-        while queue:
-            current_drive, current_folder = queue.pop(0)
-            key = (current_drive, current_folder)
-            if key in seen:
-                continue
-            seen.add(key)
-            for child in self.list_children(current_drive, current_folder):
-                if child.is_folder:
-                    if skip_folder_id and child.id == skip_folder_id:
-                        continue
-                    queue.append((child.drive_id or current_drive, child.id))
-                elif not child.deleted:
-                    files.append(child)
-        return files
-
-    # -- change tracking ----------------------------------------------------
-
-    def delta(
-        self,
-        drive_id: str,
-        folder_id: str | None = None,
-        delta_link: str | None = None,
-    ) -> tuple[list[RemoteItem], str]:
-        """Run a delta query and return ``(items, delta_link)``.
-
-        The caller persists ``delta_link`` and passes it next time to receive
-        only changes. Raises :class:`GraphError` when the endpoint does not
-        support delta on the selected folder; callers fall back to a full
-        recursive listing.
-        """
-        if delta_link:
-            url = delta_link
-        elif folder_id:
-            url = f"{_item_url(drive_id, folder_id)}/delta"
-        else:
-            url = f"{GRAPH_BASE}/drives/{_quote(drive_id)}/root/delta"
-
-        items: list[RemoteItem] = []
-        new_delta_link = ""
-        while url:
-            data = self.get(url)
-            for entry in data.get("value") or []:
-                item = remote_from_json(entry, drive_id)
-                if item.drive_id == drive_id:
-                    items.append(item)
-            url = str(data.get("@odata.nextLink") or "")
-            if not url:
-                new_delta_link = str(data.get("@odata.deltaLink") or "")
-        return items, new_delta_link
-
     # -- download / upload --------------------------------------------------
 
     def download(self, drive_id: str, item_id: str, dest_path: str) -> None:
@@ -311,6 +226,10 @@ class GraphClient:
                 download_once()
             except HttpError as retry_exc:
                 raise self._error(retry_exc) from retry_exc
+
+    def delete_item(self, drive_id: str, item_id: str) -> None:
+        """Move an item to the OneDrive recycle bin."""
+        self._request("DELETE", _item_url(drive_id, item_id))
 
     def create_upload_session(
         self,

@@ -20,7 +20,10 @@ Hard product constraints:
   other third-party runtime dependency.
 - **Graph access is folder-scoped by behaviour.** The app requests delegated
   `Files.ReadWrite.All`, but the plugin must only touch the folder the user
-  selected and the export subfolder beneath it.
+  selected — and only its **direct children**; subfolders are never entered.
+- **Everything is manual.** No scheduler, startup sync, DB listener or timer may
+  be reintroduced. Uploads, downloads, scans and clean-ups only run from an
+  explicit toolbar click or a button in the review window.
 - **Runtime dependencies are calibre-bundled only.** `pytest`, `pytest-cov` and
   `ruff` are dev/CI-only and must never be imported by plugin runtime code.
 - **Never sync a library into itself.** The plugin works remotely, but keep the
@@ -44,23 +47,25 @@ Hard product constraints:
 │   │   ├── config.py              # persistent settings + token storage
 │   │   ├── defaults.py            # shared public app ID
 │   │   ├── errors.py              # typed plugin errors
-│   │   ├── graph.py               # Microsoft Graph client (drives, delta, upload/download)
+│   │   ├── graph.py               # Microsoft Graph client (drives, children, upload/download)
 │   │   ├── http.py                # urllib transport with test seams
 │   │   ├── i18n.py                # shared `_` translation hook
+│   │   ├── index.py               # calibre-onedrive-index.json format + builder
 │   │   ├── log.py                 # logger factory
 │   │   ├── models.py              # dataclasses shared by the layers
 │   │   ├── oauth.py               # device-code + refresh flows
-│   │   ├── state.py               # SQLite import/export/delta state
-│   │   ├── sync.py                # import/export engine (network injected)
+│   │   ├── reconcile.py           # local/remote book matching for the review UI
+│   │   ├── state.py               # SQLite import/export/book-link state
+│   │   ├── sync.py                # flat import/export/scan engine (network injected)
 │   │   └── version.py             # runtime version mirror (release-please-managed)
 │   ├── gui/                       # calibre/Qt layer (guarded imports)
 │   │   ├── action.py              # InterfaceAction wiring
 │   │   ├── auth_dialog.py         # device-code sign-in dialog
 │   │   ├── config_widget.py       # configuration dialog
 │   │   ├── folder_picker.py       # Graph-backed OneDrive folder browser
-│   │   ├── library.py             # calibre DB adapter + add-book helper
-│   │   ├── scheduler.py           # DB listener + debounce + timer
-│   │   └── sync_job.py            # ThreadedJob + GUI-thread add-book marshalling
+│   │   ├── library.py             # calibre DB adapter + add-book/identifier helper
+│   │   ├── review_dialog.py       # matching window (bulk actions + row upload/download/delete)
+│   │   └── sync_job.py            # ThreadedJob (index/scan/apply/task) + GUI-thread marshalling
 │   └── resources/images/          # toolbar icon
 ├── tests/                         # pytest suite (imports the package from src/)
 └── .github/                       # workflows, release-please, dependabot
@@ -91,6 +96,12 @@ Hard product constraints:
 8. **GUI-thread rule.** Long sync work runs in a `ThreadedJob`. Adding books to
    the calibre DB must happen on the GUI thread via
    `MainThreadBookAdder`; never call the calibre API from the worker.
+9. **Jobs stay cancellable.** Every job is created with `killable=True` and the
+   engine checks `should_abort` between files/books. calibre marks a killed job
+   `failed=True` without an exception and skips the callback for a job killed
+   while still queued, so the action treats `job.killed`/`abort.is_set()` as a
+   cancellation and releases dead job references lazily. Never report a
+   cancellation as a sync failure.
 
 ## How to build
 
@@ -150,15 +161,62 @@ base branch (project) plus coverage of new lines (patch).
   `ConfigTokenStore` persists the refresh token (keyring if available, otherwise
   calibre JSON config).
 - The folder picker uses a lazily loaded tree for `/me/drive` only; shared drives
-  and drive shortcuts are not listed. Keep all later requests scoped to the
-  chosen `drive_id`/`folder_id`. Exports may target the selected folder directly
-  (`export_directly`) or a subfolder.
+  and drive shortcuts are not listed. It is opened on **every** toolbar click,
+  prefilled with the configured folder through :class:`FolderPickerDialog`'s
+  ``initial`` argument (the "Current folder: …" top-level entry). Keep all later
+  requests scoped to the chosen `drive_id`/`folder_id`.
+- Exports always go directly into the selected folder. There is no export
+  subfolder: `SyncEngine._ensure_export_folder` resolves the selected folder with
+  `graph.get_item` and uploads into it.
+- `SyncEngine._list_folder` is the only listing path. It calls
+  `graph.list_children` and drops `deleted` items; recursive listing, delta
+  links and subfolder traversal must not come back. A folder with no calibre
+  index is handled by the action's clear+upload offer, never by guessing.
 - Import state stores `(drive_id, item_id)` so remote files are never imported
   twice. Export state stores `(book_id, format)` plus the remote item id so
-  updates replace the same file. Delta links are stored per drive/folder.
-- Scheduling combines the calibre DB listener, a `QFileSystemWatcher` fallback,
-  a debounce timer, and a periodic timer. The scheduler is suspended while a
-  sync runs to avoid feedback loops.
+  updates replace the same file.
+- Book links are stored twice: in the `book_links` SQLite table for fast
+  matching and in the calibre `identifiers` field under the `onedrive` key (web
+  URL, or item id when Graph has no URL). The review window persists matches for
+  both, and imports/exports save links automatically.
+- Each upload also rewrites `calibre-onedrive-index.json` in the selected folder
+  (`common.index`). It maps `(drive_id, item_id)` and the unique filename to the
+  calibre book id, so a scan against a folder filled by an earlier export is
+  deterministic. A missing, empty or broken index is not an error for the scan
+  (it falls back to the per-row heuristics), but `SyncEngine.index_available()`
+  reports it as absent so the action can offer a fresh upload. Bulk actions and
+  `apply_plan` refresh the index.
+- `common.reconcile` builds the review plan. Matching precedence is: an explicit
+  link (state or `identifiers["onedrive"]`), then the calibre index (item id,
+  then a unique casefolded filename), then filename/title evidence. EPUB/PDF
+  metadata read during the scan resolves files with unusual names; one book is
+  assigned at most one remote item, and further copies are offered for deletion.
+- The toolbar click flow in `gui/action.py` is: `_settings_for` →
+  `_prepare_engine` → `_pick_folder` (prefilled picker) → `_remember_folder`
+  (persist) → `start_index_job` (an `IndexJob` runs `SyncEngine.index_available()`
+  off the GUI thread) → `_on_index_checked`. An index opens the review window
+  (`_open_review`); otherwise `_offer_fresh_upload` asks once and, on *Yes*, sets
+  `_next_task = "upload_all"` and starts `clear_backup`. `_on_task_done` keeps the
+  engine/state alive and chains the follow-up only when the first task neither
+  failed nor was cancelled.
+- The review window's bulk buttons map to engine methods through `TaskJob`:
+  `upload_all` (uploads missing books, links existing files, writes the index),
+  `download_all` (imports every not-yet-imported ebook and deliberately keeps
+  duplicates for calibre's Find Duplicates plugin), and `clear_backup` (deletes
+  every direct child after the dialog's confirmation, then
+  `state.forget_drive` and the action clears the calibre `onedrive`
+  identifiers). `forget_drive` is only called when nothing failed or was
+  cancelled.
+- The scan job streams plan snapshots (`SyncEngine.on_plan`, phases `library`,
+  `onedrive`, `metadata`, `final`) and progress lines (`SyncEngine.on_progress`,
+  forwarded by `ScanJob`) into the open window while the worker runs. Closing the
+  window aborts the scan (`job.abort`). There is no other entry point into the
+  engine.
+- `config_widget.py` only exposes the client ID, sign-in, folder, export format
+  and debug toggle. The remaining `Settings` fields (`export_subfolder`,
+  `export_directly`, `export_enabled`, `import_enabled`, `auto_sync`,
+  `sync_interval_minutes`) are legacy compatibility only — do not wire them back
+  into behaviour.
 
 ## When adding a feature
 
