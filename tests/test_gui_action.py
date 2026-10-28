@@ -522,6 +522,24 @@ def test_on_scan_done_without_a_window_persists_links(monkeypatch):
     assert library.identifiers[0] == (1, "onedrive", "https://onedrive.test/m")
 
 
+def test_on_scan_done_clears_identifiers_of_stale_links(monkeypatch):
+    action = review_action(monkeypatch)
+    library = action._library
+    plan = sample_plan()
+    job = types.SimpleNamespace(failed=False, result=plan)
+    action._job = job
+    action._engine.stale_links = [
+        BookLink(book_id=7, drive_id="drive", item_id="gone", name="Old.epub")
+    ]
+    statuses = []
+    monkeypatch.setattr(action, "_show_status", lambda message: statuses.append(message))
+
+    action._on_scan_done(job)
+
+    assert (7, "onedrive", "") in library.identifiers
+    assert "Removed 1 broken OneDrive link(s)." in statuses
+
+
 def test_on_scan_done_without_result_or_window(monkeypatch):
     action = review_action(monkeypatch)
     infos = []

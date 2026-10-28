@@ -233,6 +233,45 @@ def test_scan_uses_identifiers_and_cached_metadata(tmp_path):
     state.close()
 
 
+def test_scan_forgets_links_to_files_deleted_in_onedrive(tmp_path):
+    """An out-of-band clear of the folder must not leave the books linked."""
+    graph = FakeGraph()
+    graph.recursive = [remote("live", "keep001.epub")]
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    state.link_book(BookLink(book_id=1, drive_id="drive", item_id="gone", name="The Book.epub"))
+    state.link_book(BookLink(book_id=2, drive_id="drive", item_id="live", name="Keep.epub"))
+    state.link_book(BookLink(book_id=3, drive_id="other", item_id="elsewhere", name="Other.epub"))
+
+    plan = engine.scan()
+
+    assert [link.book_id for link in engine.stale_links] == [1]
+    assert state.get_link(1) is None
+    assert state.get_link(2) is not None
+    assert state.get_link(3) is not None
+    # The book whose file vanished is offered for upload again.
+    assert plan.entry("upload:1").status == "upload"
+
+
+def test_scan_reports_stale_links_as_absent_when_the_folder_is_empty(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = []
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    state.link_book(BookLink(book_id=1, drive_id="drive", item_id="gone", name="The Book.epub"))
+    messages = []
+
+    engine.on_progress = lambda fraction, message: messages.append(message)
+    engine.scan()
+
+    assert [link.book_id for link in engine.stale_links] == [1]
+    assert any("no longer in OneDrive" in message for message in messages)
+
+
 def test_scan_ignores_metadata_failures(tmp_path):
     graph = FakeGraph()
     graph.recursive = [remote("scan", "scan001.epub")]
