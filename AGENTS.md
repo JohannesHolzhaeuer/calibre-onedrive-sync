@@ -91,8 +91,13 @@ Hard product constraints:
 6. **Mark user-facing strings with `_()`** at the point of use; never bind the
    result to a module constant at import time.
 7. **All network access goes through `common.http`.** Keep the injectable
-   `transport` / `downloader` seams so tests never touch Microsoft; do not call
-   `urllib` directly from the engine or GUI.
+   `transport` / `downloader` / `_open` seams so tests never touch Microsoft; do
+   not call `urllib` directly from the engine or GUI. Every transport failure
+   (timeout, reset, refused connection) is normalised into `HttpError(status=0)`
+   so the OAuth and Graph layers can retry it. The redirect handler there restores
+   the bearer token for Microsoft storage hosts, because OneDrive answers
+   `/content` with a `302` to `*.files.1drv.com` and Python drops the header
+   cross-host; redirects outside `REDIRECT_TRUSTED_SUFFIXES` lose it.
 8. **GUI-thread rule.** Long sync work runs in a `ThreadedJob`. Adding books to
    the calibre DB must happen on the GUI thread via
    `MainThreadBookAdder`; never call the calibre API from the worker.

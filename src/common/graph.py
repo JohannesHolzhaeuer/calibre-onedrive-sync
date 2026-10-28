@@ -54,11 +54,15 @@ def _children_url(drive_id: str, item_id: str | None) -> str:
 
 
 def _root_url(drive_id: str, path: str) -> str:
-    """Address an item by its plain path inside the drive, e.g. ``/Books/index.json``."""
+    """Address an item by its plain path, e.g. ``/Books/index.json``.
+
+    Book file names contain spaces and brackets, so the path is percent-encoded
+    while the separators stay readable.
+    """
     clean = str(path or "").strip()
     if not clean.startswith("/"):
         clean = f"/{clean}"
-    return f"{GRAPH_BASE}/drives/{_quote(drive_id)}/root:{clean}:"
+    return f"{GRAPH_BASE}/drives/{_quote(drive_id)}/root:{quote(clean, safe='/')}:"
 
 
 def drive_from_json(data: dict) -> DriveInfo:

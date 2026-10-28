@@ -3,6 +3,12 @@
 The plugin must not depend on ``requests`` (calibre-only runtime deps), so all
 network access goes through ``urllib``. Tests inject a fake ``transport`` /
 ``downloader`` instead of touching the network.
+
+OneDrive answers ``/content`` requests with a ``302`` to a Microsoft storage
+host. Python 3.12+ drops the ``Authorization`` header when a redirect changes
+host, and the storage URL for a personal OneDrive is not usable without it, so
+the redirect handler below puts the bearer token back for the Microsoft hosts in
+:data:`REDIRECT_TRUSTED_SUFFIXES` and leaves it off everywhere else.
 """
 
 from __future__ import annotations
@@ -13,11 +19,73 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 DEFAULT_TIMEOUT = 30
 
+#: Hosts (and subdomains) a redirect may carry the bearer token to.
+REDIRECT_TRUSTED_SUFFIXES = (
+    ".microsoft.com",
+    ".microsoftonline.com",
+    ".live.com",
+    ".live.net",
+    ".1drv.com",
+    ".sharepoint.com",
+    ".sharepoint-df.com",
+)
+
 Transport = Callable[..., "HttpResponse"]
 Downloader = Callable[..., None]
+
+
+def is_trusted_redirect(url: str) -> bool:
+    """True when ``url`` is a Microsoft host the bearer token may follow."""
+    host = (urlsplit(str(url)).hostname or "").casefold()
+    if not host:
+        return False
+    trusted = REDIRECT_TRUSTED_SUFFIXES
+    return any(host.endswith(suffix) or host == suffix.lstrip(".") for suffix in trusted)
+
+
+class _KeepMicrosoftAuth(urllib.request.HTTPRedirectHandler):
+    """Follow redirects without losing the token for Microsoft storage hosts.
+
+    Depending on the Python version, urllib strips, redacts (to ``"***"``) or keeps
+    the ``Authorization`` header of a redirected request. Both ends are wrong for
+    OneDrive: the storage host answers ``401 Unauthenticated`` without the real
+    token, and a token sent to a foreign host is a leak. So the token is restored
+    for the Microsoft allow-list and removed for every other host.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        redirect = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirect is None:
+            return None
+        token = req.get_header("Authorization") or req.unredirected_hdrs.get("Authorization")
+        if not token:
+            return redirect
+        if is_trusted_redirect(newurl):
+            if redirect.get_header("Authorization") != token:
+                redirect.add_header("Authorization", token)
+        else:
+            redirect.headers.pop("Authorization", None)
+            redirect.unredirected_hdrs.pop("Authorization", None)
+        return redirect
+
+
+_OPENER: urllib.request.OpenerDirector | None = None
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    global _OPENER
+    if _OPENER is None:
+        _OPENER = urllib.request.build_opener(_KeepMicrosoftAuth())
+    return _OPENER
+
+
+def _open(request: urllib.request.Request, timeout: int):
+    """Single place that talks to urllib, so tests can replace it."""
+    return _opener().open(request, timeout=timeout)
 
 
 class HttpError(Exception):
@@ -53,7 +121,7 @@ def urllib_request(
     """Perform a request with ``urllib`` and return the buffered response."""
     request = urllib.request.Request(url, data=data, headers=headers or {}, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _open(request, timeout) as response:
             return HttpResponse(
                 status=getattr(response, "status", 200),
                 body=response.read(),
@@ -61,8 +129,10 @@ def urllib_request(
             )
     except urllib.error.HTTPError as exc:
         raise HttpError(exc.code, exc.read(), dict(exc.headers or {})) from exc
-    except urllib.error.URLError as exc:  # pragma: no cover - network failure
-        raise HttpError(0, str(exc.reason)) from exc
+    except OSError as exc:  # pragma: no cover - network failure
+        # urllib wraps most of these in URLError, but a stalled read surfaces as a
+        # bare TimeoutError and a refused connection as ConnectionRefusedError.
+        raise HttpError(0, str(exc) or type(exc).__name__) from exc
 
 
 def urllib_download(
@@ -75,13 +145,13 @@ def urllib_download(
     """Stream ``url`` into ``dest_path`` without buffering the whole file."""
     request = urllib.request.Request(url, headers=headers or {}, method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _open(request, timeout) as response:
             with open(dest_path, "wb") as handle:
                 shutil.copyfileobj(response, handle)
     except urllib.error.HTTPError as exc:
         raise HttpError(exc.code, exc.read(), dict(exc.headers or {})) from exc
-    except urllib.error.URLError as exc:  # pragma: no cover - network failure
-        raise HttpError(0, str(exc.reason)) from exc
+    except OSError as exc:  # pragma: no cover - network failure
+        raise HttpError(0, str(exc) or type(exc).__name__) from exc
 
 
 def request_json(
