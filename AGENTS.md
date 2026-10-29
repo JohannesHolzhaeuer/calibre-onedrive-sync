@@ -195,13 +195,23 @@ report to compare against). To check patch coverage locally, run
   matching and in the calibre `identifiers` field under the `onedrive` key (web
   URL, or item id when Graph has no URL). The review window persists matches for
   both, and imports/exports save links automatically.
-- Each upload also rewrites `calibre-onedrive-index.json` in the selected folder
-  (`common.index`). It maps `(drive_id, item_id)` and the unique filename to the
+- The index file `calibre-onedrive-index.json` in the selected folder
+  (`common.index`) maps `(drive_id, item_id)` and the unique filename to the
   calibre book id, so a scan against a folder filled by an earlier export is
   deterministic. A missing, empty or broken index is not an error for the scan
   (it falls back to the per-row heuristics), but `SyncEngine.index_available()`
-  reports it as absent so the action can offer a fresh upload. Bulk actions and
-  `apply_plan` refresh the index.
+  reports it as absent so the action can offer a fresh upload.
+- **The index is written during the pass, not after it.** `SyncEngine` keeps
+  `_index_dirty` (set by `_persist_link` and by a delete) and `_index_item` (the
+  file as the listing found it, so a rewrite replaces it in place instead of
+  creating `(1)` copies), and `_flush_index` pushes it: after every finished
+  upload batch, after every import, after every review row, and on the
+  cancellation path — closing the window mid-upload must leave a folder that
+  describes itself, which is what turns an abort into a pause. A failed write is
+  retried with growing gaps (1, 2, 4 books) so a dead endpoint cannot cost one
+  request per book; `upload_all` counts the failure, `apply_plan` and
+  `download_all` only log it. `clear_backup` resets `_index_item`, because the
+  file it pointed at has just been deleted.
 - `common.reconcile` builds the review plan. Matching precedence is: an explicit
   link (state or `identifiers["onedrive"]`), then the calibre index (item id,
   then a unique casefolded filename), then filename/title evidence. EPUB/PDF

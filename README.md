@@ -35,8 +35,11 @@ selected folder** — subfolders are never read.
   metadata-based refinements. It lists what would be uploaded or downloaded and
   which extra copies can be removed. Nothing is transferred until you confirm.
 - **Writes a calibre index** (`calibre-onedrive-index.json`) into the selected
-  folder on every upload. The index maps each stored file to its calibre book id,
-  so a later scan matches by item id instead of guessing from the filename.
+  folder. The index maps each stored file to its calibre book id, so a later
+  scan matches by item id instead of guessing from the filename. It is rewritten
+  **while** a transfer runs — after every uploaded book, after every import — so
+  stopping the pass halfway is a pause, not a folder that no longer describes
+  itself.
 - **Bulk actions** in the review window: **Upload all** uploads every book and
   writes the index, **Download all** imports everything without matching (clean
   duplicates up afterwards with calibre's *Find Duplicates* plugin), and
@@ -213,7 +216,8 @@ access token is never written to disk.
 - **Export**: uploads one EPUB/PDF per book into the selected folder. The remote
   item id is remembered so edits replace the same file. If a file for the same
   book already exists under another name or format, it is linked and adopted
-  instead of duplicated. After a successful pass the index is rewritten.
+  instead of duplicated. The index is rewritten as books arrive, not only when
+  the pass ends, which is what makes an interrupted pass resumable.
 - **Links**: each linked book gets an `onedrive` identifier containing the
   OneDrive web URL (or the item id when Graph supplies no URL). The SQLite state
   stores the same information so a reinstall can rebuild it on the next scan.
