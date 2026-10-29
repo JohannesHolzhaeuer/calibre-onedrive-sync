@@ -27,7 +27,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from time import monotonic
 from typing import Protocol
 
@@ -37,7 +37,7 @@ from .i18n import _
 from .index import INDEX_FILENAME, BookIndex, build_index
 from .log import get_logger
 from .models import BookLink, ExportRecord, RemoteItem, SyncResult
-from .progress import TransferMeter
+from .progress import TransferMeter, format_transfer
 from .reconcile import (
     IMPORT_EXTENSIONS,
     LocalBook,
@@ -98,6 +98,7 @@ class UploadJob:
     parent_id: str
     item_id: str = ""
     reported: int = 0
+    seconds: float = 0.0
 
 
 def sanitize_filename(text: str, *, limit: int = 120) -> str:
@@ -273,7 +274,7 @@ class SyncEngine:
 
         uploads = [entry for entry in plan.entries if entry.status == "upload"]
         meter = TransferMeter(self._upload_bytes(uploads), self.clock)
-        self._upload_entries(uploads, result, meter)
+        self._upload_entries(uploads, result, meter, plan=plan)
         self._flush_index(result)
         self._report(1.0, result.summary())
         return result
@@ -303,9 +304,24 @@ class SyncEngine:
         result.skipped += len(listed) - len(pending)
         total = max(1, len(pending))
         meter = TransferMeter(sum(int(item.size or 0) for item in pending), self.clock)
+        # The files to import are listed as rows up front, so the window shows an
+        # import running through them instead of a bare progress bar.
+        plan = ReconcilePlan(
+            entries=[
+                ReconcileEntry(
+                    key=f"remote:{item.drive_id or drive_id}:{item.id}",
+                    status="download",
+                    remote=item,
+                )
+                for item in pending
+            ],
+            remote_items=listed,
+        )
+        changed: list[ReconcileEntry] = []
         with tempfile.TemporaryDirectory(prefix="onedrive-sync-", dir=self.temp_root) as temp_dir:
-            for position, item in enumerate(pending):
+            for position, entry in enumerate(plan.entries):
                 if self._aborted():
+                    self._publish_rows(plan, changed)
                     self._flush_index()
                     result.cancelled = True
                     result.errors.append("Sync cancelled.")
@@ -314,23 +330,27 @@ class SyncEngine:
                     0.05 + 0.9 * self._part(meter, position / total),
                     meter.line(
                         _("Downloading {index}/{total}: {name}").format(
-                            index=position + 1, total=total, name=item.name
+                            index=position + 1, total=total, name=entry.display()
                         )
                     ),
                 )
-                item_drive = item.drive_id or drive_id
-                entry = ReconcileEntry(
-                    key=f"remote:{item_drive}:{item.id}",
-                    status="download",
-                    remote=item,
-                )
+                size = int(entry.remote.size or 0) if entry.remote else 0
+                started = self.clock()
                 try:
                     self._apply_download(entry, temp_dir, position, result)
-                    meter.add(int(item.size or 0))
+                    meter.add(size)
+                    changed.append(
+                        replace(
+                            entry,
+                            status="matched",
+                            transfer=format_transfer(size, self.clock() - started),
+                        )
+                    )
                 except Exception as exc:  # noqa: BLE001 - isolate per file
                     result.failed += 1
-                    result.errors.append(f"{item.name}: {exc}")
-                    log.warning("Could not import %s", item.name, exc_info=True)
+                    result.errors.append(f"{entry.display()}: {exc}")
+                    log.warning("Could not import %s", entry.display(), exc_info=True)
+                self._publish_rows(plan, changed)
                 self._flush_index(None, 0.05 + 0.9 * self._part(meter, position / total))
 
         self._flush_index()
@@ -402,11 +422,18 @@ class SyncEngine:
         # Uploads first: they run concurrently and share the meter, so the
         # remaining rows know how many bytes the pass already moved.
         uploads = [entry for entry in selected if entry.status == "upload"]
-        self._upload_entries(uploads, result, meter, count_index_failure=False)
+        #: Rows this pass is done with, swapped into the plan as they finish.
+        changed: list[ReconcileEntry] = []
+
+        def publish() -> None:
+            self._publish_rows(plan, changed)
+
+        self._upload_entries(uploads, result, meter, count_index_failure=False, plan=plan)
         rows = [entry for entry in selected if entry.status != "upload"]
         with tempfile.TemporaryDirectory(prefix="onedrive-sync-", dir=self.temp_root) as temp_dir:
             for index, entry in enumerate(rows):
                 if self._aborted():
+                    publish()
                     self._flush_index()
                     result.cancelled = True
                     result.errors.append("Sync cancelled.")
@@ -419,16 +446,28 @@ class SyncEngine:
                         )
                     ),
                 )
+                started = self.clock()
+                size = int(entry.remote.size or 0) if entry.remote else 0
                 try:
                     if entry.status == "download":
                         self._apply_download(entry, temp_dir, index, result)
-                        meter.add(int(entry.remote.size or 0) if entry.remote else 0)
+                        meter.add(size)
+                        changed.append(
+                            replace(
+                                entry,
+                                status="matched",
+                                transfer=format_transfer(size, self.clock() - started),
+                            )
+                        )
                     elif entry.status == "duplicate":
                         self._apply_delete(entry, result)
+                        changed.append(replace(entry, status="deleted", transfer=""))
                 except Exception as exc:  # noqa: BLE001 - isolate per row
                     result.failed += 1
                     result.errors.append(f"{entry.display()}: {exc}")
                     log.warning("Review action failed for %s", entry.key, exc_info=True)
+                # The list is told about this row before the next one starts.
+                publish()
                 # A review pass is usually short, so the index is kept current
                 # row by row; a closed window then leaves a folder that
                 # describes itself.
@@ -673,6 +712,7 @@ class SyncEngine:
         meter: TransferMeter,
         *,
         count_index_failure: bool = True,
+        plan: ReconcilePlan | None = None,
     ) -> None:
         """Upload the queue with up to ``upload_workers`` files in flight.
 
@@ -681,11 +721,21 @@ class SyncEngine:
         linearly. Everything that is *not* the network stays on this thread:
         the calibre library is not thread-safe and neither is the SQLite
         connection that records what was uploaded.
+
+        ``plan`` is the plan the rows came from; publishing it after a batch is
+        what makes the review window tick through the list book by book.
         """
         workers = min(MAX_UPLOAD_WORKERS, max(1, int(self.settings.upload_workers)))
         #: A failed index write is a failure of the bulk action itself; for a
         #: review pass the rows are the point, so there it is only logged.
         index_target = result if count_index_failure else None
+        #: Rows this pass finished, waiting to be shown in the window.
+        changed: list[ReconcileEntry] = []
+
+        def publish() -> None:
+            if plan is not None:
+                self._publish_rows(plan, changed)
+
         queue = list(entries)
         total = max(1, len(queue))
         queued = 0
@@ -693,6 +743,7 @@ class SyncEngine:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             while queue or pending:
                 if self._aborted():
+                    publish()
                     self._flush_index(index_target)
                     result.cancelled = True
                     result.errors.append("Sync cancelled.")
@@ -722,12 +773,32 @@ class SyncEngine:
                 finished, running = wait(pending, return_when=FIRST_COMPLETED, timeout=0.5)
                 for future in finished:
                     entry, job = pending.pop(future)
-                    self._finish_upload(entry, job, future, result)
+                    changed.append(self._finish_upload(entry, job, future, result))
                 if finished:
+                    # The rows the window shows are updated first, so a finished
+                    # book leaves the list, then the folder's index.
+                    publish()
                     # One rewrite per finished batch, not one per book: in a pool
                     # several books land between two flushes anyway.
                     self._flush_index(index_target, 0.1 + 0.8 * self._part(meter, queued / total))
                 pending = {future: pair for future, pair in pending.items() if future in running}
+
+    def _publish_rows(self, plan: ReconcilePlan, rows: list[ReconcileEntry]) -> None:
+        """Put finished rows into the plan and show that plan.
+
+        A plan entry is frozen, so a pass cannot flip a row in place: the new row
+        takes the old one's position and the window repaints from the plan it
+        already has. ``rows`` is emptied, so a row is never published twice.
+        """
+        if not rows:
+            return
+        positions = {entry.key: index for index, entry in enumerate(plan.entries)}
+        for row in rows:
+            index = positions.get(row.key)
+            if index is not None:
+                plan.entries[index] = row
+        rows.clear()
+        self._notify_plan(plan, "transfer")
 
     @staticmethod
     def _report_upload_failure(result: SyncResult, entry: ReconcileEntry, exc: Exception) -> None:
@@ -783,19 +854,29 @@ class SyncEngine:
             meter.add(uploaded - job.reported)
             job.reported = uploaded
 
-        return self._upload_with_fallback(
-            self.settings.drive_id, job.parent_id, job.name, job.path, job.item_id, report
-        )
+        started = self.clock()
+        try:
+            return self._upload_with_fallback(
+                self.settings.drive_id, job.parent_id, job.name, job.path, job.item_id, report
+            )
+        finally:
+            #: Wall time of this file alone, including the 404 retry path.
+            job.seconds = max(0.0, self.clock() - started)
 
     def _finish_upload(
         self, entry: ReconcileEntry, job: UploadJob, future: Future, result: SyncResult
-    ) -> None:
-        """Record a finished upload in the sync state (the caller's thread)."""
+    ) -> ReconcileEntry:
+        """Record a finished upload in the sync state (the caller's thread).
+
+        Returns the row as it now stands: a plan entry is a frozen value, so the
+        caller gets a new one and the review window shows a linked book with its
+        own transfer report in place of the pending upload.
+        """
         try:
             uploaded = future.result()
         except Exception as exc:  # noqa: BLE001 - isolate per book
             self._report_upload_failure(result, entry, exc)
-            return
+            return entry
         self.state.mark_exported(
             ExportRecord(
                 book_id=job.book_id,
@@ -810,6 +891,12 @@ class SyncEngine:
         )
         self._persist_link(job.book_id, uploaded)
         result.exported += 1
+        return replace(
+            entry,
+            status="matched",
+            remote=uploaded,
+            transfer=format_transfer(job.size, job.seconds),
+        )
 
     def _apply_download(
         self,

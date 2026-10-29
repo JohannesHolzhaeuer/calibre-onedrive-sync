@@ -467,3 +467,74 @@ def test_start_task_job_enqueues():
     assert manager.jobs == [job]
     assert job.engine is engine
     assert job.operation == "upload_all"
+
+
+def test_a_task_job_publishes_plan_snapshots_to_the_window():
+    """A bulk transfer owns the list, so it has to feed it row by row."""
+    engine = FakeReviewEngine()
+    engine.upload_all = lambda: SyncResult(exported=1)
+    plans = []
+    job = TaskJob(
+        engine,
+        "upload_all",
+        lambda _job: None,
+        description="Upload",
+        on_plan=lambda plan, phase: plans.append((plan, phase)),
+    )
+
+    job.start_work()
+
+    assert job.result.exported == 1
+    assert engine.on_plan is not None
+    engine.on_plan(engine.plan, "transfer")
+    assert plans == [(engine.plan, "transfer")]
+
+
+def test_an_apply_job_publishes_plan_snapshots_to_the_window():
+    engine = FakeReviewEngine()
+    plans = []
+    job = ApplyJob(
+        engine,
+        engine.plan,
+        [],
+        lambda _path: 1,
+        lambda _link: None,
+        lambda _job: None,
+        description="Apply",
+        on_plan=lambda plan, phase: plans.append((plan, phase)),
+    )
+
+    job.start_work()
+
+    assert engine.on_plan is not None
+    engine.on_plan(engine.plan, "transfer")
+    assert plans == [(engine.plan, "transfer")]
+
+
+def test_the_task_and_apply_factories_forward_the_plan_callback():
+    class Manager:
+        def __init__(self):
+            self.jobs = []
+
+        def run_threaded_job(self, job):
+            self.jobs.append(job)
+
+    manager = Manager()
+    engine = FakeReviewEngine()
+    marker = object()
+
+    task = start_task_job(manager, engine, "upload_all", lambda _job: None, on_plan=marker)
+    apply = start_apply_job(
+        manager,
+        engine,
+        engine.plan,
+        [],
+        lambda _path: 1,
+        lambda _link: None,
+        lambda _job: None,
+        on_plan=marker,
+    )
+
+    assert task._on_plan is marker
+    assert apply._on_plan is marker
+    assert manager.jobs == [task, apply]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from qt.core import QMessageBox, Qt
 
 from onedrive_sync.common.index import BookIndex, IndexEntry
@@ -9,6 +11,7 @@ from onedrive_sync.common.models import RemoteItem
 from onedrive_sync.common.reconcile import (
     LocalBook,
     ReconcileEntry,
+    ReconcilePlan,
     build_pending_plan,
     build_reconcile_plan,
 )
@@ -423,3 +426,82 @@ def test_set_progress_leaves_an_idle_status_alone():
     # The message is remembered for the next plan snapshot, not shown.
     assert dialog._progress_message == line
     assert dialog.progress.value() == 25
+
+
+def row_entry(book_id=1, title="The Book", status="matched", transfer="1.2 MB/s · 4.2 s"):
+    return ReconcileEntry(
+        key=f"book:{book_id}",
+        status=status,
+        local=LocalBook(book_id=book_id, title=title, authors="Author", formats=("epub",)),
+        remote=RemoteItem(id="r", name="Author - The Book.epub", drive_id="drive"),
+        transfer=transfer,
+    )
+
+
+def test_the_list_has_a_transfer_column():
+    dialog = ReviewDialog()
+    assert dialog.tree._headers[-1] == "Transfer"
+
+
+def test_a_row_shows_its_own_speed_and_time():
+    """One book's report belongs in the row, the aggregate one in the status line."""
+    dialog = ReviewDialog(ReconcilePlan(entries=[row_entry()]))
+
+    item = dialog._items["book:1"]
+    assert item.text(5) == "1.2 MB/s · 4.2 s"
+    assert item.text(1) == "Already linked"
+
+
+def test_a_row_that_never_transferred_leaves_the_column_empty():
+    dialog = ReviewDialog(ReconcilePlan(entries=[row_entry(status="upload", transfer="")]))
+
+    assert dialog._items["book:1"].text(5) == ""
+
+
+def test_a_deleted_row_says_deleted():
+    dialog = ReviewDialog(ReconcilePlan(entries=[row_entry(status="deleted", transfer="")]))
+
+    item = dialog._items["book:1"]
+    assert item.text(1) == "Deleted from OneDrive"
+    # The row is history: it is not offered to a pass any more.
+    assert item.flags() == Qt.ItemFlag.ItemIsEnabled
+
+
+def test_a_transfer_snapshot_keeps_the_live_progress_line():
+    """A row update during a transfer must not overwrite the speed line."""
+    dialog = ReviewDialog(plan())
+    dialog.start_task("upload_all")
+    line = "Uploading 2/8: The Book · 4.5 MB/s · 8 min 12 s left"
+    dialog.set_progress(0.25, line)
+
+    dialog.set_plan(plan(), phase="transfer")
+
+    assert dialog.status.text() == line
+
+
+def test_a_transfer_snapshot_without_a_line_counts_the_finished_rows():
+    dialog = ReviewDialog(plan())
+    dialog.start_task("upload_all")
+    dialog._progress_message = ""
+
+    dialog.set_plan(plan(), phase="transfer")
+
+    assert dialog.status.text().startswith("Transferring…")
+
+
+def test_a_transfer_snapshot_keeps_the_users_ticks():
+    dialog = ReviewDialog(plan())
+    dialog._set_all(False)
+    updated = [
+        replace(entry, status="matched", transfer="1 MB/s") if entry.status == "download" else entry
+        for entry in dialog.plan.entries
+    ]
+
+    dialog.set_plan(ReconcilePlan(entries=updated), phase="transfer")
+
+    # The uploaded row lost its checkbox, and the rows that remain are still
+    # unticked: a live update never silently re-checks the user's list.
+    remaining = [entry for entry in dialog.plan.entries if entry.selectable]
+    assert remaining
+    states = [dialog._items[entry.key].checkState(0) for entry in remaining]
+    assert all(state == Qt.CheckState.Unchecked for state in states)

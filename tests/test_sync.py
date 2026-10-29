@@ -1799,3 +1799,298 @@ def test_clear_backup_forgets_the_index_file_it_replaced(tmp_path):
     index_calls = [call for call in graph.uploaded if call[2] == INDEX_FILENAME]
     assert index_calls[0][4] in (None, "")
     state.close()
+
+
+class SteppingClock:
+    """A clock that only moves when the code under test says so."""
+
+    def __init__(self, now=0.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+class TimingGraph(FakeGraph):
+    """A folder whose transfers take a known amount of time."""
+
+    def __init__(self, clock, seconds=4.0) -> None:
+        super().__init__()
+        self.clock = clock
+        self.seconds = seconds
+
+    def upload_file(self, *args, **kwargs):
+        uploaded = super().upload_file(*args, **kwargs)
+        self.clock.now += self.seconds
+        return uploaded
+
+    def download(self, *args, **kwargs):
+        result = super().download(*args, **kwargs)
+        self.clock.now += self.seconds
+        return result
+
+
+def row_recorder(snapshots):
+    """An ``on_plan`` callback that records the row statuses of every snapshot."""
+
+    def on_plan(plan, phase):
+        snapshots.append((phase, [entry.status for entry in plan.entries], list(plan.entries)))
+
+    return on_plan
+
+
+def test_the_upload_pass_shows_each_book_as_it_lands(tmp_path):
+    """The list is the progress bar: one published snapshot per finished book."""
+    clock = SteppingClock()
+    graph = TimingGraph(clock)
+    library = FakeLibrary()
+    for book_id in (1, 2, 3):
+        _local_book(library, book_id, f"Book {book_id}", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder", upload_workers=1)
+    snapshots = []
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        clock=clock,
+        on_plan=row_recorder(snapshots),
+    )
+
+    result = engine.upload_all()
+
+    assert result.exported == 3
+    assert [phase for phase, _, _ in snapshots] == ["transfer"] * 3
+    assert [statuses.count("matched") for _, statuses, _ in snapshots] == [1, 2, 3]
+    # The rows are replaced in place, so the list never grows or reorders.
+    assert all(len(statuses) == 3 for _, statuses, _ in snapshots)
+    state.close()
+
+
+def test_a_finished_upload_row_reports_its_own_speed_and_time(tmp_path):
+    """Per-book numbers belong in the row; the status line keeps the aggregate."""
+    clock = SteppingClock()
+    graph = TimingGraph(clock, seconds=4.0)
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder", upload_workers=1)
+    snapshots = []
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        clock=clock,
+        on_plan=row_recorder(snapshots),
+    )
+
+    engine.upload_all()
+
+    entry = snapshots[0][2][0]
+    # Four bytes in four seconds, spelled out for this one book.
+    assert entry.transfer == "1 B/s · 4 s"
+    assert entry.status == "matched"
+    assert entry.remote is not None and entry.remote.id == "uploaded"
+    state.close()
+
+
+def test_a_cancelled_upload_pass_shows_the_books_it_finished(tmp_path):
+    """Closing the window must not hide what is already in OneDrive."""
+    clock = SteppingClock()
+    graph = TimingGraph(clock)
+    library = FakeLibrary()
+    for book_id in (1, 2):
+        _local_book(library, book_id, f"Book {book_id}", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder", upload_workers=1)
+    snapshots = []
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        clock=clock,
+        on_plan=row_recorder(snapshots),
+        should_abort=lambda: len(graph.uploaded) >= 1,
+    )
+
+    result = engine.upload_all()
+
+    assert result.cancelled
+    assert result.exported == 1
+    assert snapshots[-1][1] == ["matched", "upload"]
+    state.close()
+
+
+def test_apply_plan_shows_the_rows_it_finished(tmp_path):
+    """A review pass ticks through its rows: a delete is done, an import linked."""
+    clock = SteppingClock()
+    graph = TimingGraph(clock)
+    graph.recursive = [
+        remote("m", "Author - Matched.epub"),
+        remote("d", "Author - Matched copy.epub"),
+        remote("x", "Unknown - Download.epub", size=4),
+    ]
+    library = FakeLibrary()
+    _local_book(library, 1, "Matched", "Author", fmt="epub")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    snapshots = []
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        clock=clock,
+        add_book=lambda _path: 10,
+        on_plan=row_recorder(snapshots),
+    )
+    plan = build_reconcile_plan(
+        [LocalBook(book_id=1, title="Matched", authors="Author", formats=("epub",))],
+        graph.recursive,
+        preference="epub",
+    )
+    selected = [entry for entry in plan.entries if entry.selectable]
+    assert {entry.status for entry in selected} == {"download", "duplicate"}
+
+    result = engine.apply_plan(plan, selected)
+
+    assert result.imported == 1
+    assert result.deleted == 1
+    assert [statuses.count("matched") for _, statuses, _ in snapshots] == [2, 2]
+    assert [statuses.count("deleted") for _, statuses, _ in snapshots] == [0, 1]
+    # A removed file is done, not transferred: its row says so without numbers.
+    deleted = next(entry for entry in snapshots[-1][2] if entry.remote.id == "d")
+    assert deleted.status == "deleted"
+    assert deleted.transfer == ""
+    # The imported file reports its own speed and time in the row.
+    imported = next(entry for entry in snapshots[-1][2] if entry.remote.id == "x")
+    assert imported.status == "matched"
+    assert imported.transfer == "1 B/s · 4 s"
+    state.close()
+
+
+def test_download_all_shows_the_files_as_they_are_imported(tmp_path):
+    """An import is a transfer too: its rows tick through the list."""
+    clock = SteppingClock()
+    graph = TimingGraph(clock)
+    graph.recursive = [remote("a", "a.epub", size=4), remote("b", "b.epub", size=4)]
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    snapshots = []
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        clock=clock,
+        add_book=lambda _path: 10 + len(graph.downloaded),
+        on_plan=row_recorder(snapshots),
+    )
+
+    result = engine.download_all()
+
+    assert result.imported == 2
+    assert [statuses.count("matched") for _, statuses, _ in snapshots] == [1, 2]
+    assert [phase for phase, _, _ in snapshots] == ["transfer"] * 2
+    assert snapshots[0][2][0].transfer == "1 B/s · 4 s"
+    state.close()
+
+
+def test_a_raising_on_plan_callback_does_not_break_the_upload(tmp_path):
+    """Closing the window mid-pass must not turn finished books into failures."""
+    clock = SteppingClock()
+    graph = TimingGraph(clock)
+    library = FakeLibrary()
+    for book_id in (1, 2):
+        _local_book(library, book_id, f"Book {book_id}", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder", upload_workers=1)
+
+    def broken(_plan, _phase):
+        raise RuntimeError("window closed")
+
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        clock=clock,
+        on_plan=broken,
+    )
+
+    result = engine.upload_all()
+
+    assert result.exported == 2
+    assert result.failed == 0
+    assert [call[2] for call in graph.uploaded if call[2] != INDEX_FILENAME] == [
+        "Jane Doe - Book 1 (1).epub",
+        "Jane Doe - Book 2 (2).epub",
+    ]
+    state.close()
+
+
+def test_upload_all_without_an_on_plan_callback_still_uploads(tmp_path):
+    """A pass with nobody listening reports to the folder, not to a window."""
+    graph = FakeGraph()
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder", upload_workers=1)
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    assert engine.on_plan is None
+
+    result = engine.upload_all()
+
+    assert result.exported == 1
+    assert result.failed == 0
+    assert graph.uploaded[0][2] == "Jane Doe - The Book (1).epub"
+    state.close()
+
+
+def test_publishing_keeps_the_row_position_of_a_matched_book(tmp_path):
+    """The window repaints the list it already has, so its order must not move."""
+    engine, state = make_engine(
+        tmp_path,
+        FakeGraph(),
+        FakeLibrary(),
+        Settings(drive_id="drive", folder_id="folder"),
+        on_plan=row_recorder([]),
+    )
+    plan = ReconcilePlan(
+        entries=[
+            ReconcileEntry(key="upload:1", status="upload"),
+            ReconcileEntry(key="remote:drive:a", status="download", remote=remote("a", "a.epub")),
+            ReconcileEntry(key="upload:2", status="upload"),
+        ]
+    )
+    order = [entry.key for entry in plan.entries]
+    finished = ReconcileEntry(
+        key="remote:drive:a",
+        status="matched",
+        remote=remote("a", "a.epub"),
+        transfer="1 B/s · 4 s",
+    )
+
+    engine._publish_rows(plan, [finished])
+
+    assert [entry.key for entry in plan.entries] == order
+    assert len(plan.entries) == len(order)
+    assert plan.entries[1].status == "matched"
+    assert plan.entries[1].transfer == "1 B/s · 4 s"
+    state.close()
+
+
+def test_rows_the_plan_does_not_contain_are_not_published(tmp_path):
+    """A pass never invents rows in the window it is reporting to."""
+    graph = FakeGraph()
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    phases = []
+    engine.on_plan = lambda plan, phase: phases.append(phase)
+    kept = ReconcileEntry(key="book:1", status="upload")
+    plan = ReconcilePlan(entries=[kept])
+
+    engine._publish_rows(plan, [ReconcileEntry(key="gone", status="matched")])
+    engine._publish_rows(plan, [])
+
+    assert plan.entries == [kept]
+    assert phases == ["transfer"]
+    state.close()

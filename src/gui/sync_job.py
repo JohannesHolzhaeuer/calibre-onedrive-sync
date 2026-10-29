@@ -157,10 +157,12 @@ class TaskJob(OneDriveJob):
         callback,
         *,
         description: str | None = None,
+        on_plan=None,
         on_progress=None,
     ) -> None:
         self.engine = engine
         self.operation = str(operation)
+        self._on_plan = on_plan
         self._on_progress = on_progress
         super().__init__(description or _("OneDrive Sync"), callback)
 
@@ -168,6 +170,9 @@ class TaskJob(OneDriveJob):
         self.engine.on_progress = lambda fraction, message: self._progress(
             notifications, fraction, message
         )
+        #: Rows are published straight to the window, which shows the pass running
+        #: through the list instead of a progress bar with no content.
+        self.engine.on_plan = self._on_plan
         self.engine.should_abort = abort.is_set
         log(f"Running {self.operation} for {_location(self.engine)}")
         result = getattr(self.engine, self.operation)()
@@ -200,6 +205,7 @@ class ApplyJob(OneDriveJob):
         callback,
         *,
         description: str | None = None,
+        on_plan=None,
         on_progress=None,
     ) -> None:
         self.engine = engine
@@ -207,6 +213,7 @@ class ApplyJob(OneDriveJob):
         self.entries = list(entries)
         self._add_book = add_book
         self._link_book = link_book
+        self._on_plan = on_plan
         self._on_progress = on_progress
         super().__init__(description or _("Applying OneDrive changes"), callback)
 
@@ -214,6 +221,7 @@ class ApplyJob(OneDriveJob):
         self.engine.on_progress = lambda fraction, message: self._progress(
             notifications, fraction, message
         )
+        self.engine.on_plan = self._on_plan
         self.engine.should_abort = abort.is_set
         self.engine.add_book = self._add_book
         self.engine.link_book = self._link_book
@@ -255,10 +263,18 @@ def start_task_job(
     callback,
     *,
     description=None,
+    on_plan=None,
     on_progress=None,
 ):
     """Create and enqueue a :class:`TaskJob`; returns the job."""
-    job = TaskJob(engine, operation, callback, description=description, on_progress=on_progress)
+    job = TaskJob(
+        engine,
+        operation,
+        callback,
+        description=description,
+        on_plan=on_plan,
+        on_progress=on_progress,
+    )
     job_manager.run_threaded_job(job)
     return job
 
@@ -294,6 +310,7 @@ def start_apply_job(
     callback,
     *,
     description=None,
+    on_plan=None,
     on_progress=None,
 ):
     """Create and enqueue an :class:`ApplyJob`; returns the job."""
@@ -305,6 +322,7 @@ def start_apply_job(
         link_book,
         callback,
         description=description,
+        on_plan=on_plan,
         on_progress=on_progress,
     )
     job_manager.run_threaded_job(job)

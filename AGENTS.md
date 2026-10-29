@@ -246,6 +246,19 @@ report to compare against). To check patch coverage locally, run
   a simple PUT, per chunk above `SIMPLE_UPLOAD_LIMIT`), which is what makes the
   rate move inside a single large file. The engine's `clock` is injected, so
   tests advance time by hand and never sleep.
+- **The list keeps up with a running transfer.** `_finish_upload` *returns* the
+  finished row (a `ReconcileEntry` is frozen, so rows are values and are never
+  mutated) and `_publish_rows(plan, rows)` puts each new row at its old position
+  in the plan the window already has, then fires `on_plan(plan, "transfer")` —
+  that is what flips an uploaded book to *Already linked* while the pass is still
+  running. `upload_all`, `apply_plan` and `download_all` all publish, on the
+  caller's thread next to the index flush, and the cancellation path publishes
+  first so a paused pass leaves a list that matches the folder. Per-file numbers
+  come from `progress.format_transfer(bytes, seconds)` (`_send_upload` times its
+  own request into `UploadJob.seconds`) and land in the review window's **Transfer**
+  column; the status line keeps the aggregate rate, which is why
+  `ReviewDialog.set_plan` checks `_busy()` and not `_scanning` before it touches
+  the status line.
 - **Uploads run in a bounded pool, everything around them stays serial.**
   `SyncEngine._upload_entries` is the only upload loop (`upload_all` and the
   upload rows of `apply_plan` both go through it). It prepares a book on the

@@ -388,6 +388,7 @@ def test_review_window_apply_starts_the_apply_job(monkeypatch):
         callback,
         *,
         description=None,
+        on_plan=None,
         on_progress=None,
     ):
         started.append((engine, plan, entries, adder, linker, on_progress))
@@ -721,10 +722,11 @@ def test_review_window_bulk_actions_start_a_task(monkeypatch):
             callback,
             *,
             description=None,
+            on_plan=None,
             on_progress=None,
             _started=started,
         ):
-            _started.append((engine, task_operation, callback, description, on_progress))
+            _started.append((engine, task_operation, callback, description, on_progress, on_plan))
             return "task"
 
         monkeypatch.setattr(action_mod, "start_task_job", fake_task)
@@ -745,6 +747,8 @@ def test_review_window_bulk_actions_start_a_task(monkeypatch):
         assert status in dialog.status.text()
         assert "measuring speed" in dialog.status.text()
         assert started[0][4] == action._scan_status.emit
+        # Finished rows arrive in the open window while the pass is running.
+        assert started[0][5] == action._scan_progress.emit
         assert dialog._task == choice
         assert not dialog.upload_all_button.isEnabled()
         # Closing the window during a transfer kills the job, like a scan.
@@ -955,6 +959,7 @@ def test_apply_selected_runs_the_ticked_rows_in_the_open_window(monkeypatch):
         callback,
         *,
         description=None,
+        on_plan=None,
         on_progress=None,
     ):
         started.append(
@@ -968,6 +973,7 @@ def test_apply_selected_runs_the_ticked_rows_in_the_open_window(monkeypatch):
                 callback,
                 description,
                 on_progress,
+                on_plan,
             )
         )
         return "apply"
@@ -986,6 +992,8 @@ def test_apply_selected_runs_the_ticked_rows_in_the_open_window(monkeypatch):
     assert (started[0][4], started[0][5]) == ("adder", "linker")
     assert started[0][6] == action._apply_done.emit
     assert started[0][8] == action._scan_status.emit
+    # Finished rows arrive in the window as they finish, not only at the end.
+    assert started[0][9] == action._scan_progress.emit
     # The window stays open, busy, and owns the progress of the job it started.
     assert dialog._task == "apply"
     assert not dialog.apply_button.isEnabled()
@@ -1266,7 +1274,7 @@ def test_review_now_without_index_offers_clear_and_upload(monkeypatch):
     )
     started = []
 
-    def fake_task(_manager, _engine, task, _callback, *, description=None, on_progress=None):
+    def fake_task(_manager, _engine, task, _callback, *, description=None, on_plan=None, **_kwargs):
         started.append(task)
         return "task"
 
