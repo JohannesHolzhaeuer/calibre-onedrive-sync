@@ -236,6 +236,22 @@ report to compare against). To check patch coverage locally, run
   a simple PUT, per chunk above `SIMPLE_UPLOAD_LIMIT`), which is what makes the
   rate move inside a single large file. The engine's `clock` is injected, so
   tests advance time by hand and never sleep.
+- **Uploads run in a bounded pool, everything around them stays serial.**
+  `SyncEngine._upload_entries` is the only upload loop (`upload_all` and the
+  upload rows of `apply_plan` both go through it). It prepares a book on the
+  caller's thread (`_prepare_upload`: calibre reads, export name, reused item
+  id, folder resolution), submits only the Graph request to a
+  `ThreadPoolExecutor` (`_send_upload`), and writes the sync state on the
+  caller's thread again (`_finish_upload`) — the calibre DB and the SQLite
+  connection are not thread-safe. Size comes from
+  `Settings.upload_workers` (default 3, clamped 1–8, spin box in the config
+  dialog); `1` is the plain sequential pass. Cancelling stops queueing, cancels
+  the futures that never started and lets the in-flight files finish, and a
+  cancellation is still reported as a cancellation, never as a failure.
+  `AuthManager.get_access_token` is lock-guarded because Microsoft rotates
+  refresh tokens: two concurrent refreshes would burn the token the first one
+  stored, so a thread that waits for the lock reuses the fresh token.
+  `download_all` stays serial for the GUI-thread rule below.
 - Listing is streamed: `GraphClient.list_children(..., on_page=...)` reports every
   Graph page, `SyncEngine.scan` turns each page into a `listing` plan snapshot and
   raises `CancelledError` from the page callback, so closing the window stops a
@@ -255,8 +271,9 @@ report to compare against). To check patch coverage locally, run
   forwarded by `ScanJob`) into the open window while the worker runs. Closing the
   window aborts the scan (`job.abort`). There is no other entry point into the
   engine.
-- `config_widget.py` only exposes the client ID, sign-in, folder, export format
-  and debug toggle. The remaining `Settings` fields (`export_subfolder`,
+- `config_widget.py` only exposes the client ID, sign-in, folder, export format,
+  parallel uploads and debug toggle. The remaining `Settings` fields
+  (`export_subfolder`,
   `export_directly`, `export_enabled`, `import_enabled`, `auto_sync`,
   `sync_interval_minutes`) are legacy compatibility only — do not wire them back
   into behaviour.

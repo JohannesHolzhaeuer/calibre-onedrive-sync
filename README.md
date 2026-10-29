@@ -142,7 +142,12 @@ Open *Preferences → Plugins → Customize plugin → OneDrive Sync*:
    every toolbar click uses; change it here to point the plugin somewhere else.
 4. Choose the export format: **EPUB, falling back to PDF**, **EPUB only**, or
    **PDF only**. Books are always uploaded directly into the selected folder.
-5. Add the **OneDrive Sync** button to a toolbar via *Preferences → Toolbars &
+5. Set **Parallel uploads** — how many files to put on the wire at the same
+   time, 1 to 8, three by default. Microsoft measures the transfer rate per
+   account, so a few concurrent uploads use the line far better than one; the
+   speed and time estimate in the review window follow automatically. Set it to
+   **1** if your connection likes single transfers better.
+6. Add the **OneDrive Sync** button to a toolbar via *Preferences → Toolbars &
    menus*. If the plugin is not configured yet, the first click opens this
    dialog.
 
@@ -190,6 +195,11 @@ access token is never written to disk.
   The same line goes to calibre's job log and to its status bar. Closing the
   window stops the transfer. When the job ends, the window shows the summary and
   scans the folder again, so the rows describe what is in OneDrive now.
+- **Uploads run in parallel, imports do not**: the files go to OneDrive
+  concurrently (see **Parallel uploads** above), because that time is mostly
+  request latency. Downloads stay one by one, since adding a book to the calibre
+  library has to happen on calibre's own thread. A cancelled pass stops queueing
+  new files and lets the ones already on the wire finish.
 - **Matching**: a saved OneDrive link wins, then the `calibre-onedrive-index.json`
   written by the plugin (item id first, then a unique filename), then the
   calibre book id in the export filename, then title and author. For remote

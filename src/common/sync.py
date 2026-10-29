@@ -26,10 +26,12 @@ import re
 import tempfile
 import time
 from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from time import monotonic
 from typing import Protocol
 
-from .config import Settings
+from .config import MAX_UPLOAD_WORKERS, Settings
 from .errors import CancelledError, GraphError, SyncError
 from .i18n import _
 from .index import INDEX_FILENAME, BookIndex, build_index
@@ -75,6 +77,27 @@ class Library(Protocol):
     def format_file(self, book_id: int, fmt: str) -> tuple[str, float, int] | None: ...
 
     def identifiers(self, book_id: int) -> dict[str, str]: ...
+
+
+@dataclass
+class UploadJob:
+    """A prepared file: everything a worker thread needs to upload one book.
+
+    Building it touches calibre and the sync state, so it always happens on the
+    caller's thread; the worker only reads these plain values and talks to
+    Graph. ``reported`` is the job's own byte counter, written by one thread.
+    """
+
+    entry: ReconcileEntry
+    book_id: int
+    fmt: str
+    path: str
+    mtime: float
+    size: int
+    name: str
+    parent_id: str
+    item_id: str = ""
+    reported: int = 0
 
 
 def sanitize_filename(text: str, *, limit: int = 120) -> str:
@@ -242,32 +265,8 @@ class SyncEngine:
                 self._persist_link(entry.local.book_id, entry.remote)
 
         uploads = [entry for entry in plan.entries if entry.status == "upload"]
-        total = max(1, len(uploads))
         meter = TransferMeter(self._upload_bytes(uploads), self.clock)
-        for position, entry in enumerate(uploads):
-            if self._aborted():
-                result.cancelled = True
-                result.errors.append("Sync cancelled.")
-                break
-            self._report(
-                0.1 + 0.8 * self._part(meter, position / total),
-                meter.line(
-                    _("Uploading {index}/{total}: {name}").format(
-                        index=position + 1, total=total, name=entry.display()
-                    )
-                ),
-            )
-            seen = meter.transferred
-            try:
-                self._apply_upload(
-                    entry,
-                    result,
-                    on_progress=lambda uploaded, seen=seen: meter.add(uploaded - seen),
-                )
-            except Exception as exc:  # noqa: BLE001 - isolate per book
-                result.failed += 1
-                result.errors.append(f"{entry.display()}: {exc}")
-                log.warning("Upload all failed for %s", entry.key, exc_info=True)
+        self._upload_entries(uploads, result, meter)
 
         if not result.cancelled:
             self._report(0.95, _("Writing the OneDrive index…"))
@@ -400,29 +399,27 @@ class SyncEngine:
 
         total = max(1, len(selected))
         meter = TransferMeter(self._transfer_bytes(selected), self.clock)
+        # Uploads first: they run concurrently and share the meter, so the
+        # remaining rows know how many bytes the pass already moved.
+        uploads = [entry for entry in selected if entry.status == "upload"]
+        self._upload_entries(uploads, result, meter)
+        rows = [entry for entry in selected if entry.status != "upload"]
         with tempfile.TemporaryDirectory(prefix="onedrive-sync-", dir=self.temp_root) as temp_dir:
-            for index, entry in enumerate(selected):
+            for index, entry in enumerate(rows):
                 if self._aborted():
                     result.cancelled = True
                     result.errors.append("Sync cancelled.")
                     break
                 self._report(
-                    0.5 + 0.5 * self._part(meter, index / total),
+                    0.5 + 0.5 * self._part(meter, (len(uploads) + index) / total),
                     meter.line(
                         _("Applying {index}/{total}: {name}").format(
-                            index=index + 1, total=total, name=entry.display()
+                            index=len(uploads) + index + 1, total=total, name=entry.display()
                         )
                     ),
                 )
-                seen = meter.transferred
                 try:
-                    if entry.status == "upload":
-                        self._apply_upload(
-                            entry,
-                            result,
-                            on_progress=lambda uploaded, seen=seen: meter.add(uploaded - seen),
-                        )
-                    elif entry.status == "download":
+                    if entry.status == "download":
                         self._apply_download(entry, temp_dir, index, result)
                         meter.add(int(entry.remote.size or 0) if entry.remote else 0)
                     elif entry.status == "duplicate":
@@ -666,28 +663,82 @@ class SyncEngine:
         """Progress share: transferred bytes, or rows when the size is unknown."""
         return meter.fraction if meter.total_bytes > 0 else fallback
 
-    def _apply_upload(
-        self,
-        entry: ReconcileEntry,
-        result: SyncResult,
-        on_progress: Callable[[int], None] | None = None,
-    ) -> RemoteItem | None:
+    def _upload_entries(
+        self, entries: list[ReconcileEntry], result: SyncResult, meter: TransferMeter
+    ) -> None:
+        """Upload the queue with up to ``upload_workers`` files in flight.
+
+        Graph answers a plain PUT in a few seconds, and the time is request
+        latency, not the file size, so a few concurrent uploads scale almost
+        linearly. Everything that is *not* the network stays on this thread:
+        the calibre library is not thread-safe and neither is the SQLite
+        connection that records what was uploaded.
+        """
+        workers = min(MAX_UPLOAD_WORKERS, max(1, int(self.settings.upload_workers)))
+        queue = list(entries)
+        total = max(1, len(queue))
+        queued = 0
+        pending: dict[Future, tuple[ReconcileEntry, UploadJob]] = {}
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            while queue or pending:
+                if self._aborted():
+                    result.cancelled = True
+                    result.errors.append("Sync cancelled.")
+                    for future in pending:
+                        future.cancel()
+                    break
+                while queue and len(pending) < workers:
+                    entry = queue.pop(0)
+                    try:
+                        job = self._prepare_upload(entry)
+                    except Exception as exc:  # noqa: BLE001 - isolate per book
+                        self._report_upload_failure(result, entry, exc)
+                        continue
+                    if job is None:
+                        result.skipped += 1
+                        continue
+                    self._report(
+                        0.1 + 0.8 * self._part(meter, queued / total),
+                        meter.line(
+                            _("Uploading {index}/{total}: {name}").format(
+                                index=queued + 1, total=total, name=entry.display()
+                            )
+                        ),
+                    )
+                    queued += 1
+                    pending[pool.submit(self._send_upload, job, meter)] = (entry, job)
+                finished, running = wait(pending, return_when=FIRST_COMPLETED, timeout=0.5)
+                for future in finished:
+                    entry, job = pending.pop(future)
+                    self._finish_upload(entry, job, future, result)
+                pending = {future: pair for future, pair in pending.items() if future in running}
+
+    @staticmethod
+    def _report_upload_failure(result: SyncResult, entry: ReconcileEntry, exc: Exception) -> None:
+        """Count one book as failed without stopping the rest of the pass."""
+        result.failed += 1
+        result.errors.append(f"{entry.display()}: {exc}")
+        log.warning("Upload failed for %s", entry.key, exc_info=True)
+
+    def _prepare_upload(self, entry: ReconcileEntry) -> UploadJob | None:
+        """Read everything the upload of ``entry`` needs, on the caller's thread."""
         book = entry.local
         if book is None:
             raise SyncError("No local book for this row.")
         fmt = pick_format(book.formats, self.settings.export_format)
         if fmt is None:
-            result.skipped += 1
             return None
         info = self.library.format_file(book.book_id, fmt)
         if info is None:
-            result.skipped += 1
             return None
         path, mtime, size = info
         folder = self._ensure_export_folder()
-        title = self.library.title(book.book_id)
-        authors = self.library.authors(book.book_id)
-        name = build_export_name(title, authors, book.book_id, fmt)
+        name = build_export_name(
+            self.library.title(book.book_id),
+            self.library.authors(book.book_id),
+            book.book_id,
+            fmt,
+        )
 
         existing = self.state.get_export(book.book_id, fmt)
         link = self.state.get_link(book.book_id)
@@ -697,29 +748,52 @@ class SyncEngine:
         elif link is not None and link.extension == fmt:
             item_id = link.item_id
 
-        uploaded = self._upload_with_fallback(
-            self.settings.drive_id,
-            folder.id,
-            name,
-            path,
-            item_id,
-            on_progress,
+        return UploadJob(
+            entry=entry,
+            book_id=book.book_id,
+            fmt=fmt,
+            path=path,
+            mtime=mtime,
+            size=size,
+            name=name,
+            parent_id=folder.id,
+            item_id=item_id,
         )
+
+    def _send_upload(self, job: UploadJob, meter: TransferMeter) -> RemoteItem:
+        """Run one Graph upload; only ever called from a worker thread."""
+
+        def report(uploaded: int) -> None:
+            meter.add(uploaded - job.reported)
+            job.reported = uploaded
+
+        return self._upload_with_fallback(
+            self.settings.drive_id, job.parent_id, job.name, job.path, job.item_id, report
+        )
+
+    def _finish_upload(
+        self, entry: ReconcileEntry, job: UploadJob, future: Future, result: SyncResult
+    ) -> None:
+        """Record a finished upload in the sync state (the caller's thread)."""
+        try:
+            uploaded = future.result()
+        except Exception as exc:  # noqa: BLE001 - isolate per book
+            self._report_upload_failure(result, entry, exc)
+            return
         self.state.mark_exported(
             ExportRecord(
-                book_id=book.book_id,
-                fmt=fmt,
+                book_id=job.book_id,
+                fmt=job.fmt,
                 drive_id=self.settings.drive_id,
                 item_id=uploaded.id,
                 name=uploaded.name,
                 e_tag=uploaded.e_tag,
-                size=size,
-                local_mtime=mtime,
+                size=job.size,
+                local_mtime=job.mtime,
             )
         )
-        self._persist_link(book.book_id, uploaded)
+        self._persist_link(job.book_id, uploaded)
         result.exported += 1
-        return uploaded
 
     def _apply_download(
         self,
