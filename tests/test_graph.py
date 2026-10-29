@@ -238,6 +238,53 @@ def test_upload_simple_replaces_existing_item(tmp_path):
     assert "/items/old/content" in transport.calls[0]["url"]
 
 
+def test_upload_simple_reports_progress(tmp_path):
+    path = tmp_path / "book.epub"
+    payload = b"chapter one"
+    path.write_bytes(payload)
+    graph_client, _auth = client(
+        lambda _method, _url, _kwargs: {"id": "uploaded", "name": "book.epub", "file": {}}
+    )
+    seen = []
+    item = graph_client.upload_file("d", "parent", "book.epub", str(path), on_progress=seen.append)
+
+    assert item.id == "uploaded"
+    # A simple PUT is one request, so the whole file is reported exactly once.
+    assert seen == [len(payload)]
+
+
+def test_upload_without_a_progress_callback_still_uploads(tmp_path):
+    path = tmp_path / "book.epub"
+    path.write_bytes(b"data")
+    graph_client, _auth = client(
+        lambda _method, _url, _kwargs: {"id": "uploaded", "name": "book.epub", "file": {}}
+    )
+    item = graph_client.upload_file("d", "parent", "book.epub", str(path), on_progress=None)
+
+    assert item.id == "uploaded"
+
+
+def test_upload_chunked_reports_cumulative_progress(tmp_path, monkeypatch):
+    size = 5 * 1024 * 1024
+    path = tmp_path / "big.epub"
+    path.write_bytes(b"\0" * size)
+    # Above the real 4 MB simple-upload limit, so the chunked path is used.
+    monkeypatch.setattr(graph, "UPLOAD_CHUNK_SIZE", 2 * 1024 * 1024)
+
+    def handler(_method, url, _kwargs):
+        if url.endswith("/createUploadSession"):
+            return {"uploadUrl": "https://upload.test/session"}
+        return {"id": "uploaded", "name": "big.epub", "file": {}}
+
+    graph_client, _auth = client(handler)
+    seen = []
+    item = graph_client.upload_file("d", "parent", "big.epub", str(path), on_progress=seen.append)
+
+    assert item.id == "uploaded"
+    # One report per chunk, cumulative: 2 MB, 4 MB and then the whole file.
+    assert seen == [2 * 1024 * 1024, 4 * 1024 * 1024, size]
+
+
 def test_upload_chunked(tmp_path, monkeypatch):
     path = tmp_path / "big.epub"
     path.write_bytes(b"0123456789")

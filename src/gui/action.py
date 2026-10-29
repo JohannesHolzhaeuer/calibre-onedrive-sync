@@ -76,7 +76,6 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         self._scan_finished = False
         self._task = ""
         self._next_task = ""
-        self._pending_task = ""
         self.qaction.setIcon(
             get_icons(  # noqa: F821 - injected by calibre's plugin loader
                 "resources/images/onedrive.png", "onedrive_sync"
@@ -129,12 +128,12 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         """Show the review window first so the user sees the work that follows."""
         dialog = ReviewDialog(parent=self.gui)
         dialog.start_scanning(_("Checking the OneDrive folder for a calibre index…"))
+        dialog.bulk_requested.connect(self._on_bulk_request)
         self._review_dialog = dialog
         self._scan_plan = None
         self._scan_finished = False
         self._task = ""
         self._next_task = ""
-        self._pending_task = ""
         self._check_index()
         try:
             accepted = dialog.exec() == QDialog.DialogCode.Accepted
@@ -214,10 +213,10 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
             if not self._offer_fresh_upload(settings):
                 self._stop_window(_("OneDrive sync cancelled."))
                 return
-            # Keep the engine alive: _finish_review starts the chain below.
-            self._pending_task = "clear_backup"
+            # Confirmed: clear the folder and upload everything, chained right
+            # here so the progress runs in the window the user is looking at.
             self._next_task = "upload_all"
-            self._close_window()
+            self._start_task("clear_backup")
             return
 
         self._start_scan()
@@ -467,48 +466,66 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
             log.debug("Could not signal the OneDrive job to stop", exc_info=True)
 
     def _finish_review(self, dialog, accepted: bool) -> None:
-        """React to the review window closing."""
-        pending, self._pending_task = self._pending_task, ""
-        if pending:
-            # The index check offered a clear and fresh upload, confirmed by the
-            # user: keep the engine alive and run the chain now.
-            self._start_task(pending, _("Clearing the OneDrive folder…"))
-            return
-
+        """React to the review window closing: the work itself ran inside it."""
         if not self._scan_finished:
             # Closed while the scan was still running: stop the worker and let
             # the completion callback do the clean-up.
             self._abort_job(self._job)
             self._show_status(_("OneDrive matching cancelled."))
             return
-
+        if self._task:
+            # Closed during a bulk action: a transfer the user hid is a transfer
+            # the user does not want, and the job is killable by design.
+            self._abort_job(self._job)
+            self._next_task = ""
+            self._show_status(_("OneDrive action cancelled."))
+            return
+        self._release_review()
         plan = self._scan_plan
-        action = dialog.action() if accepted else ""
+        if accepted and plan is not None:
+            self._show_status(plan.summary())
+
+    # -- bulk actions -------------------------------------------------------
+
+    def _on_bulk_request(self, action: str) -> None:
+        """Start a bulk action requested from the open review window.
+
+        The window stays open and receives the job's progress, which is the only
+        place a two-hour upload can show its speed and remaining time.
+        """
+        if action == "apply":
+            self._apply_selected()
+            return
         if action in {"upload_all", "download_all", "clear_backup"}:
             self._next_task = ""
             self._start_task(action)
-            return
 
-        selected = dialog.selected_entries() if action == "apply" and plan is not None else []
-        if action == "apply" and plan is not None and selected:
-            self._job = start_apply_job(
-                self.gui.job_manager,
-                self._engine,
-                plan,
-                selected,
-                self._adder,
-                self._linker,
-                self._apply_done.emit,
-                description=_("Applying OneDrive changes"),
-            )
-            self._show_status(_("Applying the selected OneDrive changes…"))
+    def _apply_selected(self) -> None:
+        """Run the rows ticked in the review window, reporting into that window."""
+        dialog = self._review_dialog
+        plan = self._scan_plan
+        if dialog is None or plan is None:
             return
-
-        self._release_review()
-        if action == "apply" and plan is not None:
+        selected = dialog.selected_entries()
+        if not selected:
             QMessageBox.information(self.gui, _("OneDrive Sync"), plan.summary())
-
-    # -- bulk actions -------------------------------------------------------
+            return
+        self._job = start_apply_job(
+            self.gui.job_manager,
+            self._engine,
+            plan,
+            selected,
+            self._adder,
+            self._linker,
+            self._apply_done.emit,
+            description=_("Applying OneDrive changes"),
+            on_progress=self._scan_status.emit,
+        )
+        # Marks the window busy, so closing it kills the job like a cancelled
+        # transfer; the completion callback does the clean-up.
+        self._task = "apply"
+        dialog.start_task("apply")
+        self._show_status(_("Applying the selected OneDrive changes…"))
 
     def _task_description(self, task: str) -> str:
         if task == "upload_all":
@@ -528,7 +545,13 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
             task,
             self._task_done.emit,
             description=self._task_description(task),
+            on_progress=self._scan_status.emit,
         )
+        # Every path that starts a job owns the window's busy state, including
+        # the clear-and-upload chain the index gate offers.
+        dialog = self._review_dialog
+        if dialog is not None:
+            dialog.start_task(task)
         self._show_status(status or self._task_status(task))
 
     def _task_status(self, task: str) -> str:
@@ -541,7 +564,7 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         return _("Working on OneDrive…")
 
     def _on_task_done(self, job) -> None:
-        """Report a finished bulk action and release the sync state."""
+        """Report a finished bulk action in the window, then refresh the rows."""
         task = self._task
         self._task = ""
         if self._is_stale_job(job):
@@ -550,31 +573,30 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         # ``_close_state`` drops the library adapter, but clearing the calibre
         # identifiers still needs it, so keep a reference for the result below.
         library = self._library
+        dialog = self._review_dialog
         if job is None:
             self._next_task = ""
-            self._close_state()
+            self._end_task(dialog, _("OneDrive action stopped without a result."))
             return
         if self._job_cancelled(job):
             self._next_task = ""
-            self._close_state()
-            self._show_status(_("OneDrive action cancelled."))
+            self._end_task(dialog, _("OneDrive action cancelled."))
             return
         if getattr(job, "failed", False):
             self._next_task = ""
-            self._close_state()
             message = str(getattr(job, "exception", "") or _("Unknown error"))
             log.warning("OneDrive action %s failed: %s", task, message)
-            QMessageBox.warning(
-                self.gui,
-                _("OneDrive Sync"),
+            self._end_task(
+                dialog,
                 _("OneDrive action failed: {message}").format(message=message),
+                warning=True,
             )
             return
 
         result = getattr(job, "result", None)
         if result is None:
             self._next_task = ""
-            self._close_state()
+            self._end_task(dialog, _("OneDrive action stopped without a result."))
             return
         if task == "clear_backup" and not result.cancelled and library is not None:
             self._clear_identifiers(library)
@@ -587,18 +609,34 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
             self._start_task(next_task)
             return
 
-        self._close_state()
         summary = result.summary()
-        self._show_status(summary)
-        if result.errors:
-            details = "\n".join(result.errors[:10])
-            if len(result.errors) > 10:
-                details += "\n…"
-            for message in result.errors:
-                log.warning("OneDrive action error: %s", message)
-            QMessageBox.warning(self.gui, _("OneDrive Sync"), f"{summary}\n\n{details}")
+        for message in result.errors:
+            log.warning("OneDrive action error: %s", message)
+        self._end_task(dialog, summary, errors=result.errors)
+
+    def _end_task(self, dialog, message: str, *, errors=(), warning: bool = False) -> None:
+        """Finish a bulk action: report it, then let the window show the result.
+
+        With the window still open the rows are scanned again, because an upload
+        or import changes exactly what the list is about; a closed window only
+        gets the summary, as before.
+        """
+        self._task = ""
+        if dialog is None:
+            self._close_state()
+            self._show_status(message)
+            if warning:
+                QMessageBox.warning(self.gui, _("OneDrive Sync"), message)
+                return
+            self._report_errors(message, errors)
+            return
+        dialog.finish_task(message)
+        self._show_status(message)
+        if warning:
+            QMessageBox.warning(dialog, _("OneDrive Sync"), message)
         else:
-            QMessageBox.information(self.gui, _("OneDrive Sync"), summary)
+            self._report_errors(message, errors, parent=dialog)
+        self._start_scan()
 
     def _clear_identifiers(self, library) -> None:
         """Drop the OneDrive link from every book after the backup was cleared."""
@@ -684,37 +722,35 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         if self._job_cancelled(job) or (result is not None and result.cancelled):
             summary = result.summary() if result is not None else _("Cancelled.")
             log.info("OneDrive sync cancelled")
-            self._show_status(summary)
-            QMessageBox.information(self.gui, _("OneDrive Sync"), summary)
+            self._end_task(self._review_dialog, summary)
             return
 
         if getattr(job, "failed", False):
             message = str(getattr(job, "exception", "") or _("Unknown error"))
             log.warning("OneDrive sync failed: %s", message)
-            QMessageBox.warning(
-                self.gui,
-                _("OneDrive Sync"),
+            self._end_task(
+                self._review_dialog,
                 _("Sync failed: {message}").format(message=message),
+                warning=True,
             )
             return
 
         if result is None:
             return
-        summary = result.summary()
-        if result.errors:
-            details = "\n".join(result.errors[:10])
-            if len(result.errors) > 10:
-                details += "\n…"
-            for message in result.errors:
-                log.warning("Sync error: %s", message)
-            QMessageBox.warning(
-                self.gui,
-                _("OneDrive Sync"),
-                f"{summary}\n\n{details}",
-            )
-        else:
-            QMessageBox.information(self.gui, _("OneDrive Sync"), summary)
-        self._show_status(summary)
+        for message in result.errors:
+            log.warning("Sync error: %s", message)
+        self._end_task(self._review_dialog, result.summary(), errors=result.errors)
+
+    def _report_errors(self, summary: str, errors, parent=None) -> None:
+        """Show the result box; the errors are listed, ten at most."""
+        parent = parent if parent is not None else self.gui
+        if not errors:
+            QMessageBox.information(parent, _("OneDrive Sync"), summary)
+            return
+        details = "\n".join(errors[:10])
+        if len(errors) > 10:
+            details += "\n…"
+        QMessageBox.warning(parent, _("OneDrive Sync"), f"{summary}\n\n{details}")
 
     # -- helpers ------------------------------------------------------------
 

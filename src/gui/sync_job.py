@@ -157,13 +157,17 @@ class TaskJob(OneDriveJob):
         callback,
         *,
         description: str | None = None,
+        on_progress=None,
     ) -> None:
         self.engine = engine
         self.operation = str(operation)
+        self._on_progress = on_progress
         super().__init__(description or _("OneDrive Sync"), callback)
 
     def _run(self, notifications, abort, log):
-        self.engine.on_progress = lambda fraction, message: notifications.put((fraction, message))
+        self.engine.on_progress = lambda fraction, message: self._progress(
+            notifications, fraction, message
+        )
         self.engine.should_abort = abort.is_set
         log(f"Running {self.operation} for {_location(self.engine)}")
         result = getattr(self.engine, self.operation)()
@@ -171,6 +175,16 @@ class TaskJob(OneDriveJob):
         for message in result.errors:
             log(message)
         return result
+
+    def _progress(self, notifications, fraction: float, message: str) -> None:
+        """Report to calibre's job panel and to the open review window."""
+        notifications.put((fraction, message))
+        if self._on_progress is None:
+            return
+        try:
+            self._on_progress(fraction, message)
+        except Exception:  # noqa: BLE001 - a status update must not kill the transfer
+            pass
 
 
 class ApplyJob(OneDriveJob):
@@ -186,16 +200,20 @@ class ApplyJob(OneDriveJob):
         callback,
         *,
         description: str | None = None,
+        on_progress=None,
     ) -> None:
         self.engine = engine
         self.plan = plan
         self.entries = list(entries)
         self._add_book = add_book
         self._link_book = link_book
+        self._on_progress = on_progress
         super().__init__(description or _("Applying OneDrive changes"), callback)
 
     def _run(self, notifications, abort, log):
-        self.engine.on_progress = lambda fraction, message: notifications.put((fraction, message))
+        self.engine.on_progress = lambda fraction, message: self._progress(
+            notifications, fraction, message
+        )
         self.engine.should_abort = abort.is_set
         self.engine.add_book = self._add_book
         self.engine.link_book = self._link_book
@@ -205,6 +223,16 @@ class ApplyJob(OneDriveJob):
         for message in result.errors:
             log(message)
         return result
+
+    def _progress(self, notifications, fraction: float, message: str) -> None:
+        """Report to calibre's job panel and to the open review window."""
+        notifications.put((fraction, message))
+        if self._on_progress is None:
+            return
+        try:
+            self._on_progress(fraction, message)
+        except Exception:  # noqa: BLE001 - a status update must not kill the transfer
+            pass
 
 
 def start_index_job(
@@ -220,9 +248,17 @@ def start_index_job(
     return job
 
 
-def start_task_job(job_manager, engine: SyncEngine, operation: str, callback, *, description=None):
+def start_task_job(
+    job_manager,
+    engine: SyncEngine,
+    operation: str,
+    callback,
+    *,
+    description=None,
+    on_progress=None,
+):
     """Create and enqueue a :class:`TaskJob`; returns the job."""
-    job = TaskJob(engine, operation, callback, description=description)
+    job = TaskJob(engine, operation, callback, description=description, on_progress=on_progress)
     job_manager.run_threaded_job(job)
     return job
 
@@ -258,6 +294,7 @@ def start_apply_job(
     callback,
     *,
     description=None,
+    on_progress=None,
 ):
     """Create and enqueue an :class:`ApplyJob`; returns the job."""
     job = ApplyJob(
@@ -268,6 +305,7 @@ def start_apply_job(
         link_book,
         callback,
         description=description,
+        on_progress=on_progress,
     )
     job_manager.run_threaded_job(job)
     return job

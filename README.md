@@ -163,10 +163,12 @@ access token is never written to disk.
     refinements.
   - **No index** → you are asked whether to clear the folder (everything goes to
     the OneDrive recycle bin) and upload your whole library with a fresh index.
-    Only a confirmed *Yes* starts that chain; any error or cancellation stops it.
+    Only a confirmed *Yes* starts that chain, and it runs in the open window; any
+    error or cancellation stops it.
   - **Folder is gone** (deleted or renamed since you chose it) → you are told so
     and asked to pick a new folder.
-  Closing the window stops the scan.
+  Closing the window stops whatever is running: the scan, an upload, an import or
+  a clean-up.
 - **Flat folder only**: only the direct children of the selected folder are
   listed. Nothing inside a subfolder is read, matched, downloaded or deleted.
 - **Bulk review actions**: **Upload all** uploads every book that is not in
@@ -177,6 +179,17 @@ access token is never written to disk.
   item directly inside the selected OneDrive folder, forgets the sync state for
   that drive, and clears the `onedrive` identifier from your books, so the next
   **Upload all** starts from an empty folder.
+- **The window stays open during a transfer**: a full-library upload takes
+  minutes to hours, so the matching window keeps running and shows the live
+  progress line, including speed and the time estimate:
+
+  ```
+  Uploading 12/80: Aaron Kahlau - Was uns falsch beigebracht wird (German Edition) · 4.5 MB/s · 8 min 12 s left
+  ```
+
+  The same line goes to calibre's job log and to its status bar. Closing the
+  window stops the transfer. When the job ends, the window shows the summary and
+  scans the folder again, so the rows describe what is in OneDrive now.
 - **Matching**: a saved OneDrive link wins, then the `calibre-onedrive-index.json`
   written by the plugin (item id first, then a unique filename), then the
   calibre book id in the export filename, then title and author. For remote

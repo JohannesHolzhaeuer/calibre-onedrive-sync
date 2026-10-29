@@ -26,6 +26,7 @@ import re
 import tempfile
 import time
 from collections.abc import Callable
+from time import monotonic
 from typing import Protocol
 
 from .config import Settings
@@ -34,6 +35,7 @@ from .i18n import _
 from .index import INDEX_FILENAME, BookIndex, build_index
 from .log import get_logger
 from .models import BookLink, ExportRecord, RemoteItem, SyncResult
+from .progress import TransferMeter
 from .reconcile import (
     IMPORT_EXTENSIONS,
     LocalBook,
@@ -107,6 +109,7 @@ class SyncEngine:
         on_plan: Callable[[ReconcilePlan, str], None] | None = None,
         should_abort: Callable[[], bool] | None = None,
         temp_root: str | None = None,
+        clock: Callable[[], float] = monotonic,
     ) -> None:
         self.graph = graph
         self.state = state
@@ -119,6 +122,8 @@ class SyncEngine:
         self.on_plan = on_plan
         self.should_abort = should_abort
         self.temp_root = temp_root
+        #: Injected in tests so the transfer meter never has to wait for time.
+        self.clock = clock
         self._export_folder: RemoteItem | None = None
         #: Links the last scan found to point at deleted files (GUI clears them).
         self.stale_links: list[BookLink] = []
@@ -238,19 +243,27 @@ class SyncEngine:
 
         uploads = [entry for entry in plan.entries if entry.status == "upload"]
         total = max(1, len(uploads))
+        meter = TransferMeter(self._upload_bytes(uploads), self.clock)
         for position, entry in enumerate(uploads):
             if self._aborted():
                 result.cancelled = True
                 result.errors.append("Sync cancelled.")
                 break
             self._report(
-                0.1 + 0.8 * (position / total),
-                _("Uploading {index}/{total}: {name}").format(
-                    index=position + 1, total=total, name=entry.display()
+                0.1 + 0.8 * self._part(meter, position / total),
+                meter.line(
+                    _("Uploading {index}/{total}: {name}").format(
+                        index=position + 1, total=total, name=entry.display()
+                    )
                 ),
             )
+            seen = meter.transferred
             try:
-                self._apply_upload(entry, result)
+                self._apply_upload(
+                    entry,
+                    result,
+                    on_progress=lambda uploaded, seen=seen: meter.add(uploaded - seen),
+                )
             except Exception as exc:  # noqa: BLE001 - isolate per book
                 result.failed += 1
                 result.errors.append(f"{entry.display()}: {exc}")
@@ -283,24 +296,30 @@ class SyncEngine:
             return result
 
         self._report(0.02, _("Listing files in OneDrive…"))
-        candidates = [item for item in self._list_folder() if item.extension in IMPORT_EXTENSIONS]
-        total = max(1, len(candidates))
+        listed = [item for item in self._list_folder() if item.extension in IMPORT_EXTENSIONS]
+        pending = [
+            item
+            for item in listed
+            if not self.state.is_imported(item.drive_id or drive_id, item.id)
+        ]
+        result.skipped += len(listed) - len(pending)
+        total = max(1, len(pending))
+        meter = TransferMeter(sum(int(item.size or 0) for item in pending), self.clock)
         with tempfile.TemporaryDirectory(prefix="onedrive-sync-", dir=self.temp_root) as temp_dir:
-            for position, item in enumerate(candidates):
+            for position, item in enumerate(pending):
                 if self._aborted():
                     result.cancelled = True
                     result.errors.append("Sync cancelled.")
                     break
                 self._report(
-                    0.05 + 0.9 * (position / total),
-                    _("Downloading {index}/{total}: {name}").format(
-                        index=position + 1, total=total, name=item.name
+                    0.05 + 0.9 * self._part(meter, position / total),
+                    meter.line(
+                        _("Downloading {index}/{total}: {name}").format(
+                            index=position + 1, total=total, name=item.name
+                        )
                     ),
                 )
                 item_drive = item.drive_id or drive_id
-                if self.state.is_imported(item_drive, item.id):
-                    result.skipped += 1
-                    continue
                 entry = ReconcileEntry(
                     key=f"remote:{item_drive}:{item.id}",
                     status="download",
@@ -308,6 +327,7 @@ class SyncEngine:
                 )
                 try:
                     self._apply_download(entry, temp_dir, position, result)
+                    meter.add(int(item.size or 0))
                 except Exception as exc:  # noqa: BLE001 - isolate per file
                     result.failed += 1
                     result.errors.append(f"{item.name}: {exc}")
@@ -379,6 +399,7 @@ class SyncEngine:
                 selected = [entry for entry in selected if entry.status != "upload"]
 
         total = max(1, len(selected))
+        meter = TransferMeter(self._transfer_bytes(selected), self.clock)
         with tempfile.TemporaryDirectory(prefix="onedrive-sync-", dir=self.temp_root) as temp_dir:
             for index, entry in enumerate(selected):
                 if self._aborted():
@@ -386,14 +407,24 @@ class SyncEngine:
                     result.errors.append("Sync cancelled.")
                     break
                 self._report(
-                    0.5 + 0.5 * (index / total),
-                    f"Applying {index + 1}/{total}: {entry.display()}",
+                    0.5 + 0.5 * self._part(meter, index / total),
+                    meter.line(
+                        _("Applying {index}/{total}: {name}").format(
+                            index=index + 1, total=total, name=entry.display()
+                        )
+                    ),
                 )
+                seen = meter.transferred
                 try:
                     if entry.status == "upload":
-                        self._apply_upload(entry, result)
+                        self._apply_upload(
+                            entry,
+                            result,
+                            on_progress=lambda uploaded, seen=seen: meter.add(uploaded - seen),
+                        )
                     elif entry.status == "download":
                         self._apply_download(entry, temp_dir, index, result)
+                        meter.add(int(entry.remote.size or 0) if entry.remote else 0)
                     elif entry.status == "duplicate":
                         self._apply_delete(entry, result)
                 except Exception as exc:  # noqa: BLE001 - isolate per row
@@ -603,7 +634,44 @@ class SyncEngine:
             )
         return self._export_folder
 
-    def _apply_upload(self, entry: ReconcileEntry, result: SyncResult) -> RemoteItem | None:
+    def _upload_bytes(self, entries: list[ReconcileEntry]) -> int:
+        """Total size of the files an upload pass will send, for the estimate.
+
+        Books without a syncable format are counted as 0; they are skipped by the
+        upload itself, so the estimate only has to cover the real transfers.
+        """
+        total = 0
+        for entry in entries:
+            book = entry.local
+            if book is None:
+                continue
+            fmt = pick_format(book.formats, self.settings.export_format)
+            info = self.library.format_file(book.book_id, fmt) if fmt else None
+            if info is not None:
+                total += int(info[2])
+        return total
+
+    def _transfer_bytes(self, entries: list[ReconcileEntry]) -> int:
+        """Total bytes the selected rows will move, for the estimate."""
+        uploads = [entry for entry in entries if entry.status == "upload"]
+        downloads = sum(
+            int(entry.remote.size or 0)
+            for entry in entries
+            if entry.status == "download" and entry.remote is not None
+        )
+        return self._upload_bytes(uploads) + downloads
+
+    @staticmethod
+    def _part(meter: TransferMeter, fallback: float) -> float:
+        """Progress share: transferred bytes, or rows when the size is unknown."""
+        return meter.fraction if meter.total_bytes > 0 else fallback
+
+    def _apply_upload(
+        self,
+        entry: ReconcileEntry,
+        result: SyncResult,
+        on_progress: Callable[[int], None] | None = None,
+    ) -> RemoteItem | None:
         book = entry.local
         if book is None:
             raise SyncError("No local book for this row.")
@@ -635,6 +703,7 @@ class SyncEngine:
             name,
             path,
             item_id,
+            on_progress,
         )
         self.state.mark_exported(
             ExportRecord(
@@ -696,17 +765,26 @@ class SyncEngine:
         name: str,
         path: str,
         item_id: str,
+        on_progress: Callable[[int], None] | None = None,
     ) -> RemoteItem:
         if item_id:
             try:
                 return self.graph.upload_file(
-                    drive_id, parent_id, name, path, item_id=item_id, conflict="rename"
+                    drive_id,
+                    parent_id,
+                    name,
+                    path,
+                    item_id=item_id,
+                    conflict="rename",
+                    on_progress=on_progress,
                 )
             except GraphError as exc:
                 if exc.status != 404:
                     raise
                 log.info("Previous OneDrive item is gone; uploading %s again", name)
-        return self.graph.upload_file(drive_id, parent_id, name, path, conflict="rename")
+        return self.graph.upload_file(
+            drive_id, parent_id, name, path, conflict="rename", on_progress=on_progress
+        )
 
     # -- calibre index ------------------------------------------------------
 

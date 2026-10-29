@@ -54,6 +54,7 @@ Hard product constraints:
 │   │   ├── log.py                 # logger factory
 │   │   ├── models.py              # dataclasses shared by the layers
 │   │   ├── oauth.py               # device-code + refresh flows
+│   │   ├── progress.py            # transfer speed + remaining-time estimates
 │   │   ├── reconcile.py           # local/remote book matching for the review UI
 │   │   ├── state.py               # SQLite import/export/book-link state
 │   │   ├── sync.py                # flat import/export/scan engine (network injected)
@@ -213,11 +214,28 @@ report to compare against). To check patch coverage locally, run
   `_check_index` (`start_index_job` runs `SyncEngine.index_available()` off the
   GUI thread) → `_on_index_checked`. An index starts the scan into the open
   window; otherwise `_offer_fresh_upload` asks once, parented to that window, and
-  on *Yes* sets `_pending_task = "clear_backup"` plus `_next_task = "upload_all"`
-  and closes the window — `_finish_review` then starts the chain. `_on_task_done`
-  keeps the engine/state alive and chains the follow-up only when the first task
-  neither failed nor was cancelled. A Graph 404 during the check means the stored
-  folder is gone: `_reselect_folder` asks for a new one and reopens the window.
+  on *Yes* starts the `clear_backup` → `upload_all` chain right there
+  (`_next_task`), in the open window. A Graph 404 during the check means the
+  stored folder is gone: `_reselect_folder` asks for a new one and reopens the
+  window.
+- **Bulk actions run inside the open window.** `ReviewDialog.bulk_requested` is
+  answered by `_on_bulk_request`, which starts the job and puts the window into
+  its busy state (`ReviewDialog.start_task`); progress arrives through
+  `_scan_status` → `dialog.set_progress`, and `_end_task` shows the summary and
+  starts a fresh scan so the rows match what the job did. `_finish_review` no
+  longer starts anything — closing the window during a job aborts it.
+  `SyncResult.summary()` is the message that ends a task.
+- **Transfers report speed and time left.** `common.progress.TransferMeter`
+  turns bytes into a smoothed rate (EWMA, `MIN_SAMPLE_INTERVAL` guards a ~0 s
+  window) plus an ETA; `SyncEngine` owns one per pass, seeded with the total
+  bytes it is about to move (`_upload_bytes`/`_transfer_bytes`, and the listing's
+  sizes for downloads). Every progress line is `meter.line(...)`, so the review
+  window, calibre's job panel and the status bar all show
+  `Uploading 12/80: Title · 4.5 MB/s · 8 min 12 s left`. `GraphClient.upload_file`
+  reports cumulative bytes through `on_progress` (once per request: one shot for
+  a simple PUT, per chunk above `SIMPLE_UPLOAD_LIMIT`), which is what makes the
+  rate move inside a single large file. The engine's `clock` is injected, so
+  tests advance time by hand and never sleep.
 - Listing is streamed: `GraphClient.list_children(..., on_page=...)` reports every
   Graph page, `SyncEngine.scan` turns each page into a `listing` plan snapshot and
   raises `CancelledError` from the page callback, so closing the window stops a
