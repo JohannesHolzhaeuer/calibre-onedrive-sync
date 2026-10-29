@@ -229,6 +229,49 @@ def test_apply_job_exposes_abort_to_the_engine():
     assert engine.should_abort() is True
 
 
+def test_apply_job_forwards_live_progress():
+    engine = FakeReviewEngine()
+    progress = []
+    job = ApplyJob(
+        engine,
+        engine.plan,
+        [],
+        lambda _path: 1,
+        lambda _link: None,
+        lambda _job: None,
+        description="Apply",
+        on_progress=lambda fraction, message: progress.append((fraction, message)),
+    )
+    job.start_work()
+
+    # FakeReviewEngine.apply_plan() reports one progress event.
+    assert progress == [(0.8, "apply")]
+
+
+def test_apply_job_ignores_a_broken_progress_callback():
+    engine = FakeReviewEngine()
+
+    def boom(*_args):
+        raise RuntimeError("window closed")
+
+    done = []
+    job = ApplyJob(
+        engine,
+        engine.plan,
+        [],
+        lambda _path: 1,
+        lambda _link: None,
+        done.append,
+        description="Apply",
+        on_progress=boom,
+    )
+    job.start_work()
+
+    assert job.result is engine.result
+    assert not job.failed
+    assert done == [job]
+
+
 def test_scan_job_forwards_the_live_plan_callback():
     engine = FakeReviewEngine()
     plans = []
@@ -328,6 +371,48 @@ def test_task_job_runs_the_named_operation():
     assert done == [job]
     assert callable(engine.should_abort)
     assert job.killable
+
+
+def test_task_job_forwards_live_progress():
+    engine = FakeReviewEngine()
+
+    def clear_backup():
+        engine.on_progress(0.4, "deleting")
+        engine.on_progress(0.9, "deleting more")
+        return SyncResult(deleted=2)
+
+    engine.clear_backup = clear_backup
+    progress = []
+    job = TaskJob(
+        engine,
+        "clear_backup",
+        lambda _job: None,
+        description="Clear",
+        on_progress=lambda fraction, message: progress.append((fraction, message)),
+    )
+    job.start_work()
+
+    assert progress == [(0.4, "deleting"), (0.9, "deleting more")]
+
+
+def test_task_job_ignores_a_broken_progress_callback():
+    engine = FakeReviewEngine()
+
+    def clear_backup():
+        engine.on_progress(0.4, "deleting")
+        return SyncResult(deleted=1)
+
+    def boom(*_args):
+        raise RuntimeError("window closed")
+
+    engine.clear_backup = clear_backup
+    done = []
+    job = TaskJob(engine, "clear_backup", done.append, on_progress=boom)
+    job.start_work()
+
+    assert job.result.deleted == 1
+    assert not job.failed
+    assert done == [job]
 
 
 def test_task_job_reports_engine_errors():

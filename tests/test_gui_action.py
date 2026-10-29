@@ -378,12 +378,25 @@ def test_review_window_apply_starts_the_apply_job(monkeypatch):
     action = review_action(monkeypatch)
     started = []
 
-    def fake_apply(manager, engine, plan, entries, adder, linker, callback, *, description=None):
-        started.append((engine, plan, entries, adder, linker))
+    def fake_apply(
+        manager,
+        engine,
+        plan,
+        entries,
+        adder,
+        linker,
+        callback,
+        *,
+        description=None,
+        on_progress=None,
+    ):
+        started.append((engine, plan, entries, adder, linker, on_progress))
         return "apply"
 
     monkeypatch.setattr(action_mod, "start_apply_job", fake_apply)
-    click_through(action, monkeypatch, accept=True, while_open=lambda _dialog: run_scan(action))
+    dialog = click_through(
+        action, monkeypatch, accept=True, while_open=lambda _dialog: run_scan(action)
+    )
 
     assert action._job == "apply"
     assert action._state is not None  # kept open for the apply pass
@@ -391,6 +404,10 @@ def test_review_window_apply_starts_the_apply_job(monkeypatch):
     assert started[0][1] is action._scan_plan
     assert {entry.status for entry in started[0][2]} == {"upload", "download"}
     assert (started[0][3], started[0][4]) == ("adder", "linker")
+    # The progress of the job is streamed into the window that started it.
+    assert started[0][5] == action._scan_status.emit
+    assert dialog._task == "apply"
+    assert not dialog.apply_button.isEnabled()
 
 
 def test_review_window_accept_without_selection_shows_the_summary(monkeypatch):
@@ -689,10 +706,10 @@ def test_late_callback_of_a_superseded_job_is_ignored(monkeypatch):
 
 
 def test_review_window_bulk_actions_start_a_task(monkeypatch):
-    for choice, operation, status in (
-        ("upload_all", "upload_all", "Uploading"),
-        ("download_all", "download_all", "Downloading"),
-        ("clear_backup", "clear_backup", "Deleting"),
+    for choice, operation, status, description in (
+        ("upload_all", "upload_all", "Uploading", "Uploading"),
+        ("download_all", "download_all", "Downloading", "Downloading"),
+        ("clear_backup", "clear_backup", "Deleting", "Clearing"),
     ):
         action = review_action(monkeypatch)
         started = []
@@ -704,13 +721,14 @@ def test_review_window_bulk_actions_start_a_task(monkeypatch):
             callback,
             *,
             description=None,
+            on_progress=None,
             _started=started,
         ):
-            _started.append((engine, task_operation, callback, description))
+            _started.append((engine, task_operation, callback, description, on_progress))
             return "task"
 
         monkeypatch.setattr(action_mod, "start_task_job", fake_task)
-        click_through(
+        dialog = click_through(
             action,
             monkeypatch,
             accept=True,
@@ -722,7 +740,15 @@ def test_review_window_bulk_actions_start_a_task(monkeypatch):
         assert action._task == operation
         assert started[0][0] == action._engine
         assert started[0][1] == operation
-        assert status in action.gui.status_bar.messages[-1]
+        assert description in started[0][3]  # the job description calibre shows
+        # The window stays open in its busy state, showing its own progress line.
+        assert status in dialog.status.text()
+        assert "measuring speed" in dialog.status.text()
+        assert started[0][4] == action._scan_status.emit
+        assert dialog._task == choice
+        assert not dialog.upload_all_button.isEnabled()
+        # Closing the window during a transfer kills the job, like a scan.
+        assert action.gui.status_bar.messages[-1] == "OneDrive action cancelled."
 
 
 def task_action(monkeypatch, task="upload_all"):
@@ -800,6 +826,195 @@ def test_on_task_done_ignores_a_stale_job(monkeypatch):
     action._job = object()
 
     action._on_task_done(types.SimpleNamespace(failed=False, result=SyncResult()))
+
+
+def open_window(action, monkeypatch, scans=None):
+    """Put an open review window on the action, busy with its task."""
+
+    def fake_scan(_manager, _engine, _callback, **kwargs):
+        if scans is not None:
+            scans.append(kwargs)
+        return "scan"
+
+    monkeypatch.setattr(action_mod, "start_scan_job", fake_scan)
+    dialog = ReviewDialog(sample_plan(), parent=action.gui)
+    dialog.start_task(action._task)
+    action._review_dialog = dialog
+    return dialog
+
+
+def test_a_finished_task_reports_in_the_open_window_and_scans_again(monkeypatch):
+    action = task_action(monkeypatch)
+    scans = []
+    dialog = open_window(action, monkeypatch, scans=scans)
+    infos = []
+    monkeypatch.setattr(action_mod.QMessageBox, "information", lambda *args: infos.append(args))
+
+    run_task(action, result=SyncResult(exported=3))
+
+    # The result box belongs to the window the user was watching, and the rows
+    # are refreshed so they describe OneDrive as it is now.
+    assert infos and infos[-1][0] is dialog and "exported 3" in infos[-1][2]
+    assert dialog._task == ""
+    assert dialog._scanning
+    assert len(scans) == 1
+    assert action._task == ""
+
+
+def test_a_finished_task_with_errors_warns_in_the_open_window(monkeypatch):
+    action = task_action(monkeypatch, "download_all")
+    dialog = open_window(action, monkeypatch)
+    warnings = []
+    monkeypatch.setattr(action_mod.QMessageBox, "warning", lambda *args: warnings.append(args))
+
+    run_task(action, result=SyncResult(imported=1, errors=["bad.epub: boom"]))
+
+    assert warnings and warnings[-1][0] is dialog and "boom" in warnings[-1][2]
+    assert (
+        "Imported 1, exported 0, deleted 0, skipped 0, failed 0." in action.gui.status_bar.messages
+    )
+
+
+def test_a_failed_task_reports_in_the_open_window(monkeypatch):
+    action = task_action(monkeypatch)
+    dialog = open_window(action, monkeypatch)
+    warnings = []
+    monkeypatch.setattr(action_mod.QMessageBox, "warning", lambda *args: warnings.append(args))
+
+    run_task(action, failed=True, exception=RuntimeError("network down"))
+
+    assert warnings and warnings[-1][0] is dialog and "network down" in warnings[-1][2]
+    assert dialog._task == ""
+    assert action._job == "scan"
+
+
+def test_a_cancelled_task_reports_in_the_open_window(monkeypatch):
+    action = task_action(monkeypatch)
+    dialog = open_window(action, monkeypatch)
+    infos = []
+    monkeypatch.setattr(action_mod.QMessageBox, "information", lambda *args: infos.append(args))
+
+    run_task(action, killed=True)
+
+    assert infos and infos[-1][0] is dialog
+    assert infos[-1][2] == "OneDrive action cancelled."
+    assert dialog._task == ""
+
+
+def test_the_window_is_idle_and_checked_again_before_the_rescan(monkeypatch):
+    """``finish_task`` runs first: the summary is on screen, the buttons are free."""
+    action = task_action(monkeypatch)
+    scans = []
+    dialog = open_window(action, monkeypatch, scans=scans)
+    monkeypatch.setattr(action_mod.QMessageBox, "information", lambda *args: None)
+    seen = {}
+    original = action._start_scan
+
+    def spy():
+        seen["status"] = dialog.status.text()
+        seen["task"] = dialog._task
+        seen["buttons"] = [
+            dialog.apply_button.isEnabled(),
+            dialog.upload_all_button.isEnabled(),
+            dialog.download_all_button.isEnabled(),
+            dialog.clear_backup_button.isEnabled(),
+        ]
+        original()
+
+    monkeypatch.setattr(action, "_start_scan", spy)
+
+    run_task(action, result=SyncResult(exported=2))
+
+    assert seen == {
+        "status": SyncResult(exported=2).summary(),
+        "task": "",
+        "buttons": [True, True, True, True],
+    }
+    # ... and only then is the folder scanned again into the open window.
+    assert len(scans) == 1
+    assert dialog._scanning
+    assert action._job == "scan"
+
+
+def test_apply_selected_runs_the_ticked_rows_in_the_open_window(monkeypatch):
+    action = review_action(monkeypatch)
+    plan = sample_plan()
+    dialog = ReviewDialog(plan)
+    dialog._set_all(True)
+    action._review_dialog = dialog
+    action._scan_plan = plan
+    started = []
+
+    def fake_apply(
+        manager,
+        engine,
+        passed_plan,
+        entries,
+        adder,
+        linker,
+        callback,
+        *,
+        description=None,
+        on_progress=None,
+    ):
+        started.append(
+            (
+                manager,
+                engine,
+                passed_plan,
+                entries,
+                adder,
+                linker,
+                callback,
+                description,
+                on_progress,
+            )
+        )
+        return "apply"
+
+    monkeypatch.setattr(action_mod, "start_apply_job", fake_apply)
+
+    action._apply_selected()
+
+    assert action._job == "apply"
+    assert action._task == "apply"
+    assert started[0][0] is action.gui.job_manager
+    assert started[0][1] is action._engine
+    assert started[0][2] is plan
+    # Every ticked row is applied, duplicates included (they were ticked by hand).
+    assert {entry.status for entry in started[0][3]} == {"upload", "download", "duplicate"}
+    assert (started[0][4], started[0][5]) == ("adder", "linker")
+    assert started[0][6] == action._apply_done.emit
+    assert started[0][8] == action._scan_status.emit
+    # The window stays open, busy, and owns the progress of the job it started.
+    assert dialog._task == "apply"
+    assert not dialog.apply_button.isEnabled()
+    assert not dialog.download_all_button.isEnabled()
+    assert not dialog.clear_backup_button.isEnabled()
+    assert action.gui.status_bar.messages[-1] == "Applying the selected OneDrive changes…"
+
+
+def test_apply_selected_without_a_tick_shows_the_summary_and_runs_nothing(monkeypatch):
+    action = review_action(monkeypatch)
+    plan = sample_plan()
+    dialog = ReviewDialog(plan)
+    dialog._set_all(False)  # the user unticked every row
+    action._review_dialog = dialog
+    action._scan_plan = plan
+    infos = []
+    monkeypatch.setattr(action_mod.QMessageBox, "information", lambda *args: infos.append(args))
+    started = []
+    monkeypatch.setattr(action_mod, "start_apply_job", lambda *_args, **_kwargs: started.append(1))
+
+    action._apply_selected()
+
+    assert infos and infos[-1][0] is action.gui
+    assert infos[-1][2] == plan.summary()
+    assert started == []
+    assert action._job is None
+    assert action._task == ""
+    assert dialog._task == ""
+    assert dialog.apply_button.isEnabled()  # still idle, nothing to wait for
 
 
 def test_clear_backup_clears_the_calibre_identifiers(monkeypatch):
@@ -1051,7 +1266,7 @@ def test_review_now_without_index_offers_clear_and_upload(monkeypatch):
     )
     started = []
 
-    def fake_task(_manager, _engine, task, _callback, *, description=None):
+    def fake_task(_manager, _engine, task, _callback, *, description=None, on_progress=None):
         started.append(task)
         return "task"
 
@@ -1065,6 +1280,9 @@ def test_review_now_without_index_offers_clear_and_upload(monkeypatch):
     assert action._task == "clear_backup"
     assert action._next_task == "upload_all"
     assert action._state is not None
+    # The chain runs in the window the user is looking at, not after it closed.
+    assert "Deleting the OneDrive backup" in dialog.status.text()
+    assert not dialog.clear_backup_button.isEnabled()
 
 
 def test_review_now_without_index_can_be_cancelled(monkeypatch):

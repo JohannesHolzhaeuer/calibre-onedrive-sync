@@ -93,7 +93,9 @@ class FakeGraph:
         with open(dest, "wb") as handle:
             handle.write(self.files.get(item_id, b"book"))
 
-    def upload_file(self, drive_id, parent_id, name, path, *, item_id="", conflict="rename"):
+    def upload_file(
+        self, drive_id, parent_id, name, path, *, item_id="", conflict="rename", on_progress=None
+    ):
         self.uploaded.append((drive_id, parent_id, name, path, item_id, conflict))
         with open(path, "rb") as handle:
             self.uploaded_bytes[name] = handle.read()
@@ -101,7 +103,10 @@ class FakeGraph:
             raise self.upload_errors.pop(0)
         if self.upload_error is not None:
             raise self.upload_error
-        return remote("uploaded", name, parent=parent_id, size=os.path.getsize(path))
+        size = os.path.getsize(path)
+        if on_progress is not None:
+            on_progress(size)
+        return remote("uploaded", name, parent=parent_id, size=size)
 
     def delete_item(self, drive_id, item_id):
         if self.delete_error is not None:
@@ -112,7 +117,9 @@ class FakeGraph:
 class FailingIndexGraph(FakeGraph):
     """A folder whose books upload fine but whose index file cannot be written."""
 
-    def upload_file(self, drive_id, parent_id, name, path, *, item_id="", conflict="rename"):
+    def upload_file(
+        self, drive_id, parent_id, name, path, *, item_id="", conflict="rename", on_progress=None
+    ):
         if name == INDEX_FILENAME:
             raise OSError("disk full")
         return super().upload_file(

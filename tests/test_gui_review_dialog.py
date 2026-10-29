@@ -315,3 +315,111 @@ def test_index_banner_explains_the_matching():
     assert "Upload all" in bare.index_status.text()
 
     assert ReviewDialog().index_status.text() == ""
+
+
+# -- bulk actions run inside the open window ---------------------------------
+
+
+def collect_requests(dialog):
+    """Record every ``bulk_requested`` emission (the shim signal is real)."""
+    requests: list[str] = []
+    dialog.bulk_requested.connect(requests.append)
+    return requests
+
+
+def test_bulk_button_requests_without_closing_the_window():
+    dialog = ReviewDialog(plan())
+    requests = collect_requests(dialog)
+
+    dialog.download_all_button.click()
+    assert requests == ["download_all"]
+    assert dialog.action() == "download_all"
+    # The window must stay open: a bulk job takes minutes and hides nothing.
+    assert not getattr(dialog, "_accepted", False)
+    assert not dialog._busy()
+
+
+def test_a_second_click_is_ignored_while_a_task_runs():
+    dialog = ReviewDialog(plan())
+    requests = collect_requests(dialog)
+
+    dialog.upload_all_button.click()
+    assert requests == ["upload_all"]
+
+    dialog.start_task("upload_all")
+    dialog.upload_all_button.click()
+    dialog.download_all_button.click()
+    # Nothing new is requested and the running action is not replaced.
+    assert requests == ["upload_all"]
+    assert dialog.action() == "upload_all"
+
+
+def test_clicks_are_ignored_while_the_scan_runs():
+    dialog = ReviewDialog(plan())
+    requests = collect_requests(dialog)
+
+    dialog.start_scanning()
+    dialog.download_all_button.click()
+    assert requests == []
+    assert dialog.action() == ""
+
+
+def test_start_task_disables_the_actions_and_shows_the_speed_status():
+    dialog = ReviewDialog(plan())
+    assert dialog.apply_button.isEnabled()
+
+    dialog.start_task("upload_all")
+    assert dialog._task == "upload_all"
+    assert dialog.progress.range() == (0, 100)
+    assert dialog.progress.value() == 0
+    assert dialog.progress.isVisible()
+
+    status = dialog.status.text()
+    assert "Uploading every book to OneDrive" in status
+    assert "measuring speed" in status
+
+    assert not dialog.apply_button.isEnabled()
+    assert not dialog.upload_all_button.isEnabled()
+    assert not dialog.download_all_button.isEnabled()
+    assert not dialog.clear_backup_button.isEnabled()
+
+
+def test_finish_task_restores_the_idle_window():
+    dialog = ReviewDialog(plan())
+    dialog.start_task("download_all")
+    dialog.set_progress(0.5, "Downloading 3/10: The Book")
+
+    dialog.finish_task("Downloaded 3 book(s).")
+    assert dialog.status.text() == "Downloaded 3 book(s)."
+    assert not dialog.progress.isVisible()
+    assert dialog.progress.value() == 100
+    assert dialog._task == ""
+    assert dialog._progress_message == ""
+    assert not dialog._busy()
+
+    assert dialog.apply_button.isEnabled()
+    assert dialog.upload_all_button.isEnabled()
+    assert dialog.download_all_button.isEnabled()
+    assert dialog.clear_backup_button.isEnabled()
+
+
+def test_set_progress_updates_the_status_while_a_task_runs():
+    dialog = ReviewDialog(plan())
+    dialog.start_task("upload_all")
+
+    line = "Uploading 2/8: The Book · 4.5 MB/s · 8 min 12 s left"
+    dialog.set_progress(0.25, line)
+    assert dialog.status.text() == line
+    assert dialog.progress.value() == 25
+
+
+def test_set_progress_leaves_an_idle_status_alone():
+    dialog = ReviewDialog(plan())
+    before = dialog.status.text()
+
+    line = "Uploading 2/8: The Book · 4.5 MB/s"
+    dialog.set_progress(0.25, line)
+    assert dialog.status.text() == before
+    # The message is remembered for the next plan snapshot, not shown.
+    assert dialog._progress_message == line
+    assert dialog.progress.value() == 25

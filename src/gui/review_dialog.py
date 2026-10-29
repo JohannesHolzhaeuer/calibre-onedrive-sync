@@ -19,6 +19,7 @@ from qt.core import (
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
+    pyqtSignal,
 )
 
 from ..common.i18n import _
@@ -59,6 +60,9 @@ def _stable_key(entry: ReconcileEntry) -> str:
 class ReviewDialog(QDialog):
     """List the reconciliation plan live and collect the user's selection."""
 
+    #: A bulk action was requested; the window stays open and shows its progress.
+    bulk_requested = pyqtSignal(str)
+
     def __init__(self, plan: ReconcilePlan | None = None, parent=None) -> None:
         super().__init__(parent)
         self.plan = plan if plan is not None else ReconcilePlan(entries=[])
@@ -67,6 +71,8 @@ class ReviewDialog(QDialog):
         #: user's ticks or unticks.
         self._checked: dict[str, bool] = {}
         self._scanning = False
+        #: Name of the bulk action currently running in this window.
+        self._task = ""
         #: Latest progress line from the scan; kept across plan snapshots so the
         #: status does not fall back to a generic "checking" message.
         self._progress_message = ""
@@ -188,7 +194,7 @@ class ReviewDialog(QDialog):
         self.progress.setValue(max(self.progress.value(), value))
         if message:
             self._progress_message = message
-            if self._scanning:
+            if self._busy():
                 self.status.setText(message)
 
     def set_plan(self, plan: ReconcilePlan, phase: str = "") -> None:
@@ -278,9 +284,49 @@ class ReviewDialog(QDialog):
         super().accept()
 
     def _request(self, action: str) -> None:
-        """Close the window and let the action start the matching job."""
+        """Ask the action to run a bulk job and show its progress here.
+
+        The window stays open: a full-library upload takes minutes to hours, and
+        closing the window would hide exactly the progress the user is waiting
+        for. The action answers :attr:`bulk_requested`, calls :meth:`start_task`
+        and reports back through :meth:`finish_task`.
+        """
+        if self._busy():
+            return
         self._action = action
-        self.accept()
+        self.bulk_requested.emit(action)
+
+    def start_task(self, action: str) -> None:
+        """Switch into the "job running" state with a fresh progress bar."""
+        self._task = action
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setVisible(True)
+        self.status.setText(self._task_text(action))
+        self._refresh_buttons()
+
+    def finish_task(self, message: str) -> None:
+        """Leave the "job running" state and show the result summary."""
+        self._task = ""
+        self._progress_message = ""
+        self.progress.setValue(100)
+        self.progress.setVisible(False)
+        self.status.setText(message)
+        self._refresh_buttons()
+
+    def _task_text(self, action: str) -> str:
+        """Initial status line of a running bulk action, with the speed suffix."""
+        labels = {
+            "upload_all": _("Uploading every book to OneDrive"),
+            "download_all": _("Downloading every OneDrive book"),
+            "clear_backup": _("Deleting the OneDrive backup"),
+            "apply": _("Applying the selected rows"),
+        }
+        return f"{labels.get(action, _('Working on OneDrive'))} · {_('measuring speed…')}"
+
+    def _busy(self) -> bool:
+        """True while a scan or a bulk job owns the window."""
+        return self._scanning or bool(self._task)
 
     def _request_clear_backup(self) -> None:
         answer = QMessageBox.question(
@@ -341,7 +387,7 @@ class ReviewDialog(QDialog):
 
     def _refresh_buttons(self) -> None:
         selectable = any(entry.selectable for entry in self.plan.entries)
-        idle = not self._scanning
+        idle = not self._busy()
         self.apply_button.setEnabled(bool(idle and selectable))
         self.upload_all_button.setEnabled(idle)
         self.download_all_button.setEnabled(idle)

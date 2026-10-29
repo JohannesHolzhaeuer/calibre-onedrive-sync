@@ -345,8 +345,13 @@ class GraphClient:
         *,
         item_id: str | None = None,
         conflict: str = "rename",
+        on_progress: Callable[[int], None] | None = None,
     ) -> RemoteItem:
-        """Upload ``path`` as ``name`` (simple PUT or chunked session)."""
+        """Upload ``path`` as ``name`` (simple PUT or chunked session).
+
+        ``on_progress`` receives how many bytes of this file are uploaded so far
+        (cumulative), once per request, so a large file reports while it runs.
+        """
         size = os.path.getsize(path)
         if size <= SIMPLE_UPLOAD_LIMIT:
             if item_id:
@@ -358,10 +363,13 @@ class GraphClient:
                 )
             with open(path, "rb") as handle:
                 data = handle.read()
-            return remote_from_json(
+            uploaded = remote_from_json(
                 self.put_bytes(url, data, content_type="application/octet-stream"),
                 drive_id,
             )
+            if on_progress is not None:
+                on_progress(len(data))
+            return uploaded
 
         session = self.create_upload_session(
             drive_id, parent_id, name, item_id=item_id, conflict=conflict
@@ -369,7 +377,7 @@ class GraphClient:
         upload_url = str(session.get("uploadUrl", ""))
         if not upload_url:
             raise GraphError(0, "Microsoft Graph did not return an upload URL.")
-        return self._upload_chunks(drive_id, parent_id, name, upload_url, path, size)
+        return self._upload_chunks(drive_id, parent_id, name, upload_url, path, size, on_progress)
 
     def _upload_chunks(
         self,
@@ -379,6 +387,7 @@ class GraphClient:
         upload_url: str,
         path: str,
         size: int,
+        on_progress: Callable[[int], None] | None = None,
     ) -> RemoteItem:
         offset = 0
         result: dict = {}
@@ -401,6 +410,8 @@ class GraphClient:
                 except HttpError as exc:
                     raise self._error(exc) from exc
                 offset = end + 1
+                if on_progress is not None:
+                    on_progress(offset)
                 ranges = result.get("nextExpectedRanges") or []
                 if ranges:
                     try:
