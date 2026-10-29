@@ -59,6 +59,9 @@ class FakeGraph:
         self.upload_errors = []
         self.uploaded = []
         self.uploaded_bytes = {}
+        #: Every upload as ``(name, payload)``, in order, so a test can watch a
+        #: file that is rewritten several times during one pass.
+        self.upload_history = []
         self.files = {}
         self.downloaded = []
         self.deleted = []
@@ -100,6 +103,7 @@ class FakeGraph:
         self.uploaded.append((drive_id, parent_id, name, path, item_id, conflict))
         with open(path, "rb") as handle:
             self.uploaded_bytes[name] = handle.read()
+        self.upload_history.append((name, self.uploaded_bytes[name]))
         if self.upload_errors:
             raise self.upload_errors.pop(0)
         if self.upload_error is not None:
@@ -144,6 +148,31 @@ class GatingGraph(FakeGraph):
         self._started.set()
         self._release.wait(5)
         return super().upload_file(*args, **kwargs)
+
+
+class CountingFailingIndexGraph(FailingIndexGraph):
+    """The same broken index endpoint, with a counter for the attempts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.index_attempts = 0
+
+    def upload_file(
+        self, drive_id, parent_id, name, path, *, item_id="", conflict="rename", on_progress=None
+    ):
+        if name == INDEX_FILENAME:
+            self.index_attempts += 1
+        return super().upload_file(
+            drive_id, parent_id, name, path, item_id=item_id, conflict=conflict
+        )
+
+
+class ClearingGraph(FakeGraph):
+    """A folder that really loses the children it is told to delete."""
+
+    def delete_item(self, drive_id, item_id):
+        super().delete_item(drive_id, item_id)
+        self.recursive = [item for item in self.recursive if item.id != item_id]
 
 
 class ConcurrencyGraph(FakeGraph):
@@ -1151,8 +1180,13 @@ def test_upload_all_stops_between_uploads_when_cancelled(tmp_path):
     assert result.cancelled
     assert result.exported == 1
     assert "Sync cancelled." in result.errors
-    # The index is not rewritten once the run was cancelled.
-    assert [call[2] for call in graph.uploaded] == ["Jane Doe - One (1).epub"]
+    assert [call[2] for call in graph.uploaded if call[2] != INDEX_FILENAME] == [
+        "Jane Doe - One (1).epub"
+    ]
+    # A cancelled pass is a pause, so the index is written anyway: the folder
+    # already in OneDrive has to describe itself to the next scan.
+    index = json.loads(graph.uploaded_bytes[INDEX_FILENAME])
+    assert [book["name"] for book in index["books"]] == ["Jane Doe - One (1).epub"]
     state.close()
 
 
@@ -1280,8 +1314,10 @@ def test_download_all_stops_between_downloads_when_cancelled(tmp_path):
     assert result.cancelled
     assert result.imported == 1
     assert "Sync cancelled." in result.errors
-    # Cancelled runs do not touch the index.
-    assert INDEX_FILENAME not in graph.uploaded_bytes
+    # The imported file is in the index, so a paused import can be finished
+    # later without importing it twice.
+    index = json.loads(graph.uploaded_bytes[INDEX_FILENAME])
+    assert [book["item_id"] for book in index["books"]] == ["a"]
     state.close()
 
 
@@ -1657,4 +1693,109 @@ def test_index_write_skips_links_without_an_item_id_or_name(tmp_path):
     assert result.imported == 1
     payload = json.loads(graph.uploaded_bytes[INDEX_FILENAME])
     assert [book["book_id"] for book in payload["books"]] == [10]
+    state.close()
+
+
+def test_apply_plan_writes_the_index_when_it_is_cancelled(tmp_path):
+    """A cancelled review pass is a pause, so the index is written first."""
+    graph = FakeGraph()
+    graph.recursive = [
+        remote("idx", INDEX_FILENAME, size=10),
+        remote("m", "Author - Matched.epub"),
+        remote("d", "Unknown - Download.epub"),
+    ]
+    library = FakeLibrary()
+    _local_book(library, 1, "Matched", "Author", fmt="epub")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings, should_abort=lambda: True)
+    plan = build_reconcile_plan(
+        [LocalBook(book_id=1, title="Matched", authors="Author", formats=("epub",))],
+        [item for item in graph.recursive if item.name != INDEX_FILENAME],
+        preference="epub",
+    )
+    selected = [entry for entry in plan.entries if entry.selectable]
+    assert selected, "the plan needs a row the pass will not reach"
+
+    result = engine.apply_plan(plan, selected)
+
+    assert result.cancelled
+    assert result.imported == 0
+    # The matched book was recognised before the pass stopped, and that
+    # knowledge is in the folder, not only in the local state.
+    index = json.loads(graph.uploaded_bytes[INDEX_FILENAME])
+    assert [book["item_id"] for book in index["books"]] == ["m"]
+    state.close()
+
+
+def test_the_index_is_rewritten_after_every_uploaded_book(tmp_path):
+    """A pass that is paused halfway leaves an index that knows about book 7."""
+    graph = FakeGraph()
+    library = FakeLibrary()
+    for book_id in (1, 2, 3):
+        _local_book(library, book_id, f"Book {book_id}", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder", upload_workers=1)
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    result = engine.upload_all()
+
+    writes = [payload for name, payload in graph.upload_history if name == INDEX_FILENAME]
+    assert [len(json.loads(payload)["books"]) for payload in writes] == [1, 2, 3]
+    assert result.exported == 3
+    state.close()
+
+
+def test_the_index_rewrite_replaces_the_same_file(tmp_path):
+    """One index file per pass, not one ``(1)``/``(2)`` copy per flush."""
+    graph = FakeGraph()
+    library = FakeLibrary()
+    for book_id in (1, 2, 3):
+        _local_book(library, book_id, f"Book {book_id}", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder", upload_workers=1)
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    engine.upload_all()
+
+    index_calls = [call for call in graph.uploaded if call[2] == INDEX_FILENAME]
+    assert len(index_calls) == 3
+    # The first write has nothing to replace; every later one reuses the item
+    # Graph handed back, which is what keeps the folder free of duplicates.
+    assert index_calls[0][4] in (None, "")
+    assert [call[4] for call in index_calls[1:]] == ["uploaded", "uploaded"]
+    assert {call[5] for call in index_calls} == {"replace"}
+    state.close()
+
+
+def test_a_failing_index_write_is_retried_with_growing_gaps(tmp_path):
+    """Four books and a dead index endpoint cost two requests, not four."""
+    graph = CountingFailingIndexGraph()
+    library = FakeLibrary()
+    for book_id in (1, 2, 3, 4):
+        _local_book(library, book_id, f"Book {book_id}", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder", upload_workers=1)
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    result = engine.upload_all()
+
+    assert result.exported == 4
+    assert result.failed == 2
+    assert graph.index_attempts == 2
+    assert INDEX_FILENAME not in graph.uploaded_bytes
+    state.close()
+
+
+def test_clear_backup_forgets_the_index_file_it_replaced(tmp_path):
+    """After an empty folder, the next pass must create the index again."""
+    graph = ClearingGraph()
+    graph.recursive = [remote("idx", INDEX_FILENAME, size=10), remote("a", "a.epub")]
+    library = FakeLibrary()
+    _local_book(library, 1, "Book 1", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder", upload_workers=1)
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    engine.clear_backup()
+    result = engine.upload_all()
+
+    assert result.exported == 1
+    index_calls = [call for call in graph.uploaded if call[2] == INDEX_FILENAME]
+    assert index_calls[0][4] in (None, "")
     state.close()

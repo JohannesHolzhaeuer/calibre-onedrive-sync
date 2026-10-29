@@ -148,6 +148,13 @@ class SyncEngine:
         #: Injected in tests so the transfer meter never has to wait for time.
         self.clock = clock
         self._export_folder: RemoteItem | None = None
+        #: Index file as it is in the folder, so a rewrite replaces it in place.
+        self._index_item: RemoteItem | None = None
+        #: Set when the folder's index no longer describes what was synced.
+        self._index_dirty = False
+        #: Books to pass before retrying a failed index write (1, 2, 4, …).
+        self._index_skip = 0
+        self._index_backoff = 1
         #: Links the last scan found to point at deleted files (GUI clears them).
         self.stale_links: list[BookLink] = []
 
@@ -249,7 +256,7 @@ class SyncEngine:
             result.cancelled = True
             result.errors.append("Sync cancelled.")
             return result
-        index_item, index = self._load_index(remote_items)
+        _index_item, index = self._load_index(remote_items)
         links = {(link.drive_id, link.item_id): link.book_id for link in self.state.all_links()}
         plan = build_reconcile_plan(
             self._local_books(),
@@ -267,15 +274,7 @@ class SyncEngine:
         uploads = [entry for entry in plan.entries if entry.status == "upload"]
         meter = TransferMeter(self._upload_bytes(uploads), self.clock)
         self._upload_entries(uploads, result, meter)
-
-        if not result.cancelled:
-            self._report(0.95, _("Writing the OneDrive index…"))
-            try:
-                self._write_index_from_state(index_item)
-            except Exception as exc:  # noqa: BLE001 - books are already uploaded
-                result.failed += 1
-                result.errors.append(f"OneDrive index: {exc}")
-                log.warning("Could not write the OneDrive index", exc_info=True)
+        self._flush_index(result)
         self._report(1.0, result.summary())
         return result
 
@@ -307,6 +306,7 @@ class SyncEngine:
         with tempfile.TemporaryDirectory(prefix="onedrive-sync-", dir=self.temp_root) as temp_dir:
             for position, item in enumerate(pending):
                 if self._aborted():
+                    self._flush_index()
                     result.cancelled = True
                     result.errors.append("Sync cancelled.")
                     break
@@ -331,13 +331,9 @@ class SyncEngine:
                     result.failed += 1
                     result.errors.append(f"{item.name}: {exc}")
                     log.warning("Could not import %s", item.name, exc_info=True)
+                self._flush_index(None, 0.05 + 0.9 * self._part(meter, position / total))
 
-        if not result.cancelled:
-            self._report(0.98, _("Writing the OneDrive index…"))
-            try:
-                self._write_index_from_state()
-            except Exception:  # noqa: BLE001 - imported books are already saved
-                log.warning("Could not write the OneDrive index", exc_info=True)
+        self._flush_index()
         self._report(1.0, result.summary())
         return result
 
@@ -345,6 +341,10 @@ class SyncEngine:
         """Delete every item in the selected folder and forget the sync state."""
         result = SyncResult()
         drive_id = self.settings.drive_id
+        #: The folder is being emptied, so its index file is gone with it; the
+        #: next pass must create a new one instead of replacing a dead item.
+        self._index_item = None
+        self._index_dirty = False
         if self._aborted():
             result.cancelled = True
             result.errors.append("Sync cancelled.")
@@ -402,11 +402,12 @@ class SyncEngine:
         # Uploads first: they run concurrently and share the meter, so the
         # remaining rows know how many bytes the pass already moved.
         uploads = [entry for entry in selected if entry.status == "upload"]
-        self._upload_entries(uploads, result, meter)
+        self._upload_entries(uploads, result, meter, count_index_failure=False)
         rows = [entry for entry in selected if entry.status != "upload"]
         with tempfile.TemporaryDirectory(prefix="onedrive-sync-", dir=self.temp_root) as temp_dir:
             for index, entry in enumerate(rows):
                 if self._aborted():
+                    self._flush_index()
                     result.cancelled = True
                     result.errors.append("Sync cancelled.")
                     break
@@ -428,11 +429,11 @@ class SyncEngine:
                     result.failed += 1
                     result.errors.append(f"{entry.display()}: {exc}")
                     log.warning("Review action failed for %s", entry.key, exc_info=True)
-        if not result.cancelled and (result.imported or result.exported or result.deleted):
-            try:
-                self._write_index_from_state()
-            except Exception:  # noqa: BLE001 - the review actions already ran
-                log.warning("Could not update the OneDrive index", exc_info=True)
+                # A review pass is usually short, so the index is kept current
+                # row by row; a closed window then leaves a folder that
+                # describes itself.
+                self._flush_index()
+        self._flush_index()
         self._report(1.0, result.summary())
         return result
 
@@ -590,6 +591,8 @@ class SyncEngine:
         link = BookLink.from_remote(book_id, remote)
         self.state.link_book(link)
         self._notify_link(link)
+        #: A new link is new information for the folder's index file.
+        self._index_dirty = True
 
     def _notify_link(self, link: BookLink) -> None:
         if self.link_book is None:
@@ -664,7 +667,12 @@ class SyncEngine:
         return meter.fraction if meter.total_bytes > 0 else fallback
 
     def _upload_entries(
-        self, entries: list[ReconcileEntry], result: SyncResult, meter: TransferMeter
+        self,
+        entries: list[ReconcileEntry],
+        result: SyncResult,
+        meter: TransferMeter,
+        *,
+        count_index_failure: bool = True,
     ) -> None:
         """Upload the queue with up to ``upload_workers`` files in flight.
 
@@ -675,6 +683,9 @@ class SyncEngine:
         connection that records what was uploaded.
         """
         workers = min(MAX_UPLOAD_WORKERS, max(1, int(self.settings.upload_workers)))
+        #: A failed index write is a failure of the bulk action itself; for a
+        #: review pass the rows are the point, so there it is only logged.
+        index_target = result if count_index_failure else None
         queue = list(entries)
         total = max(1, len(queue))
         queued = 0
@@ -682,6 +693,7 @@ class SyncEngine:
         with ThreadPoolExecutor(max_workers=workers) as pool:
             while queue or pending:
                 if self._aborted():
+                    self._flush_index(index_target)
                     result.cancelled = True
                     result.errors.append("Sync cancelled.")
                     for future in pending:
@@ -711,6 +723,10 @@ class SyncEngine:
                 for future in finished:
                     entry, job = pending.pop(future)
                     self._finish_upload(entry, job, future, result)
+                if finished:
+                    # One rewrite per finished batch, not one per book: in a pool
+                    # several books land between two flushes anyway.
+                    self._flush_index(index_target, 0.1 + 0.8 * self._part(meter, queued / total))
                 pending = {future: pair for future, pair in pending.items() if future in running}
 
     @staticmethod
@@ -831,6 +847,7 @@ class SyncEngine:
         if link is not None:
             self.state.unlink_book(link.book_id)
         result.deleted += 1
+        self._index_dirty = True
 
     def _upload_with_fallback(
         self,
@@ -927,6 +944,8 @@ class SyncEngine:
             ),
             None,
         )
+        #: Later writes during this pass replace this very file.
+        self._index_item = item
         if item is None:
             return None, None
         try:
@@ -940,6 +959,41 @@ class SyncEngine:
             log.warning("Could not read the OneDrive index", exc_info=True)
             return item, None
         return item, (index if index.books else None)
+
+    def _flush_index(self, result: SyncResult | None = None, fraction: float = 0.95) -> None:
+        """Push the index file whenever the last book changed what it says.
+
+        The index is what makes the next scan deterministic, so it has to
+        describe the folder *during* a pass, not only after one: closing the
+        window halfway through an upload is a pause, and a pause is only a pause
+        if the folder can explain itself afterwards.
+
+        A write that fails is retried with growing gaps (next book, then two,
+        then four) so a dead endpoint does not cost one request per book, while a
+        OneDrive that recovers mid-pass is caught again. The failure is reported
+        through ``result`` when the caller wants it counted.
+        """
+        if not self._index_dirty:
+            return
+        if self._index_skip > 0:
+            self._index_skip -= 1
+            return
+        self._index_dirty = False
+        self._report(fraction, _("Writing the OneDrive index…"))
+        try:
+            written = self._write_index_from_state(self._index_item)
+        except Exception as exc:  # noqa: BLE001 - the books are already uploaded
+            self._index_skip = self._index_backoff
+            self._index_backoff *= 2
+            log.warning("Could not write the OneDrive index", exc_info=True)
+            if result is not None:
+                result.failed += 1
+                result.errors.append(f"OneDrive index: {exc}")
+            return
+        self._index_skip = 0
+        self._index_backoff = 1
+        if written is not None:
+            self._index_item = written
 
     def _write_index_from_state(self, existing: RemoteItem | None = None) -> RemoteItem | None:
         """Write the index that maps every linked book to its OneDrive item."""
