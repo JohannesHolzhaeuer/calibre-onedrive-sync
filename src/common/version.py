@@ -11,7 +11,7 @@ release PR is created. See ``build/sync_version.py``.
 
 from __future__ import annotations
 
-__version__ = "0.4.0"  # x-release-please-version
+__version__ = "0.5.0"  # x-release-please-version
 
 #: ``(major, minor, patch)`` tuple consumed by the calibre plugin class.
 VERSION_TUPLE: tuple[int, int, int] = tuple(int(part) for part in __version__.split("."))  # type: ignore[assignment]
