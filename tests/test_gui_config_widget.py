@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from qt.core import QDialog
 
-from onedrive_sync.common.config import Settings
+from onedrive_sync.common.config import (
+    MAX_UPLOAD_WORKERS,
+    MIN_UPLOAD_WORKERS,
+    Settings,
+)
 from onedrive_sync.common.models import FolderRef
 from onedrive_sync.gui import config_widget
 from onedrive_sync.gui.config_widget import ConfigWidget, open_config
@@ -51,6 +55,17 @@ def test_load_and_fields(monkeypatch):
     assert fields["folder_id"] == "folder"
     assert fields["export_format"] == "pdf"
     assert "export_subfolder" not in fields
+
+
+def test_the_upload_workers_box_round_trips_the_setting(monkeypatch):
+    widget = widget_with(monkeypatch, settings=base_settings(upload_workers=6))
+    assert widget.upload_workers.value() == 6
+    assert widget.fields()["upload_workers"] == 6
+
+    widget.upload_workers.setValue(99)
+    assert widget.upload_workers.value() == MAX_UPLOAD_WORKERS
+    widget.upload_workers.setValue(-3)
+    assert widget.upload_workers.value() == MIN_UPLOAD_WORKERS
 
 
 def test_load_without_folder_or_token(monkeypatch):

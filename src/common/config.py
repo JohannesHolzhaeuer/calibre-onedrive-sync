@@ -31,6 +31,12 @@ DEFAULT_SYNC_INTERVAL = 15
 MIN_SYNC_INTERVAL = 1
 MAX_SYNC_INTERVAL = 1440
 
+#: Graph throttles per account, not per file, so a few uploads at once scale
+#: almost linearly. Above ~8 the service starts answering 429/503.
+DEFAULT_UPLOAD_WORKERS = 3
+MIN_UPLOAD_WORKERS = 1
+MAX_UPLOAD_WORKERS = 8
+
 
 @dataclass
 class Settings:
@@ -47,6 +53,8 @@ class Settings:
     export_subfolder: str = "Calibre Export"
     export_directly: bool = False
     export_format: str = DEFAULT_EXPORT_FORMAT
+    #: Concurrent uploads of a bulk action; 1 is the plain sequential pass.
+    upload_workers: int = DEFAULT_UPLOAD_WORKERS
     import_enabled: bool = True
     export_enabled: bool = True
     auto_sync: bool = True
@@ -79,6 +87,9 @@ class Settings:
         settings = cls(**values)
         settings.sync_interval_minutes = max(
             MIN_SYNC_INTERVAL, min(MAX_SYNC_INTERVAL, settings.sync_interval_minutes)
+        )
+        settings.upload_workers = min(
+            MAX_UPLOAD_WORKERS, max(MIN_UPLOAD_WORKERS, settings.upload_workers)
         )
         if settings.export_format not in EXPORT_FORMATS:
             settings.export_format = DEFAULT_EXPORT_FORMAT

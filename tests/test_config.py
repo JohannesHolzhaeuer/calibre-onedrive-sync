@@ -37,6 +37,17 @@ def test_settings_from_dict_defaults_and_clamping():
     assert settings.sync_interval_minutes == config.MIN_SYNC_INTERVAL
 
 
+def test_upload_workers_default_and_clamping():
+    assert Settings.from_dict(None).upload_workers == config.DEFAULT_UPLOAD_WORKERS
+
+    settings = Settings.from_dict({"upload_workers": 99})
+    assert settings.upload_workers == config.MAX_UPLOAD_WORKERS
+    settings = Settings.from_dict({"upload_workers": 0})
+    assert settings.upload_workers == config.MIN_UPLOAD_WORKERS
+    settings = Settings.from_dict({"upload_workers": "nope"})
+    assert settings.upload_workers == config.DEFAULT_UPLOAD_WORKERS
+
+
 def test_load_and_save_settings_round_trip(prefs_backend):
     defaults = config.load_settings()
     assert defaults.client_id == config.DEFAULT_CLIENT_ID
@@ -52,6 +63,7 @@ def test_load_and_save_settings_round_trip(prefs_backend):
         export_enabled=True,
         auto_sync=False,
         sync_interval_minutes=30,
+        upload_workers=5,
         debug=True,
     )
     config.save_settings(settings)

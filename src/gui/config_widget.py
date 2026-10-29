@@ -16,6 +16,7 @@ from qt.core import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -24,6 +25,8 @@ from ..common.auth import AuthManager
 from ..common.config import (
     DEFAULT_EXPORT_FORMAT,
     EXPORT_FORMATS,
+    MAX_UPLOAD_WORKERS,
+    MIN_UPLOAD_WORKERS,
     ConfigTokenStore,
     Settings,
     clear_refresh_token,
@@ -110,6 +113,20 @@ class ConfigWidget(QWidget):
             self.export_format.addItem(labels.get(value, value), value)
         layout.addWidget(self.export_format)
 
+        layout.addWidget(QLabel(_("Parallel uploads")))
+        self.upload_workers = QSpinBox()
+        self.upload_workers.setRange(MIN_UPLOAD_WORKERS, MAX_UPLOAD_WORKERS)
+        layout.addWidget(self.upload_workers)
+        workers_help = QLabel(
+            _(
+                "How many files to upload at the same time. Microsoft measures the "
+                "rate per account, so a few parallel uploads use the line far better "
+                "than one; the estimate in the review window follows automatically."
+            )
+        )
+        workers_help.setWordWrap(True)
+        layout.addWidget(workers_help)
+
         self.debug = QCheckBox(_("Debug (verbose logging)"))
         layout.addWidget(self.debug)
 
@@ -139,6 +156,7 @@ class ConfigWidget(QWidget):
             self._folder = None
         index = self.export_format.findData(settings.export_format or DEFAULT_EXPORT_FORMAT)
         self.export_format.setCurrentIndex(index if index >= 0 else 0)
+        self.upload_workers.setValue(settings.upload_workers)
         self.debug.setChecked(settings.debug)
         self._refresh_auth_status()
         self._refresh_folder_label()
@@ -156,6 +174,7 @@ class ConfigWidget(QWidget):
             "folder_path": folder.path if folder else "",
             "folder_name": folder.name if folder else "",
             "export_format": self.export_format.currentData() or DEFAULT_EXPORT_FORMAT,
+            "upload_workers": self.upload_workers.value(),
             "debug": self.debug.isChecked(),
         }
 

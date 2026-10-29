@@ -12,6 +12,7 @@ hand and never sleep.
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from time import monotonic
 
@@ -73,6 +74,8 @@ class TransferMeter:
         self._alpha = min(1.0, max(0.01, float(alpha)))
         self._transferred = 0
         self._sampled_bytes = 0
+        #: Parallel uploads report into one meter.
+        self._lock = threading.Lock()
         self._started = clock()
         self._sample_at = self._started
         self._rate = 0.0
@@ -105,19 +108,21 @@ class TransferMeter:
         Bytes that arrive in the same instant as the previous sample are carried
         into the next measurable window: a window of ~0 s would read as an absurd
         speed, and the first chunk of a transfer always lands right at the start.
+        Parallel uploads share one meter, so the counter is guarded.
         """
-        self._transferred += max(0, int(count))
-        now = self._clock()
-        elapsed = now - self._sample_at
-        if elapsed < MIN_SAMPLE_INTERVAL:
-            return
-        sample = (self._transferred - self._sampled_bytes) / elapsed
-        if self._rate <= 0.0:
-            self._rate = sample
-        else:
-            self._rate += self._alpha * (sample - self._rate)
-        self._sampled_bytes = self._transferred
-        self._sample_at = now
+        with self._lock:
+            self._transferred += max(0, int(count))
+            now = self._clock()
+            elapsed = now - self._sample_at
+            if elapsed < MIN_SAMPLE_INTERVAL:
+                return
+            sample = (self._transferred - self._sampled_bytes) / elapsed
+            if self._rate <= 0.0:
+                self._rate = sample
+            else:
+                self._rate += self._alpha * (sample - self._rate)
+            self._sampled_bytes = self._transferred
+            self._sample_at = now
 
     @property
     def eta_seconds(self) -> float | None:

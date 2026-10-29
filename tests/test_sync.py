@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 
 import pytest
 
@@ -125,6 +126,54 @@ class FailingIndexGraph(FakeGraph):
         return super().upload_file(
             drive_id, parent_id, name, path, item_id=item_id, conflict=conflict
         )
+
+
+class GatingGraph(FakeGraph):
+    """Uploads that block until told, so a test can cancel a running pass.
+
+    ``started`` signals that a file is on the wire, ``release`` ends the wait;
+    the engine under test is expected to set ``release`` when it aborts.
+    """
+
+    def __init__(self, started, release) -> None:
+        super().__init__()
+        self._started = started
+        self._release = release
+
+    def upload_file(self, *args, **kwargs):
+        self._started.set()
+        self._release.wait(5)
+        return super().upload_file(*args, **kwargs)
+
+
+class ConcurrencyGraph(FakeGraph):
+    """Uploads that only finish once ``party`` of them run at the same time.
+
+    A barrier is the only way to *prove* parallelism without sleeping: if the
+    engine ever uploads fewer files at once, ``wait`` times out and the upload
+    raises, so the test sees failures instead of passing for the wrong reason.
+    """
+
+    def __init__(self, party=3) -> None:
+        super().__init__()
+        self.barrier = threading.Barrier(party, timeout=5)
+        self.in_flight = 0
+        self.max_in_flight = 0
+        self.threads: list[int] = []
+        self._counted = threading.Lock()
+
+    def upload_file(self, *args, **kwargs):
+        name = args[2] if len(args) > 2 else kwargs.get("name", "")
+        if name == INDEX_FILENAME:
+            return super().upload_file(*args, **kwargs)  # written serially, at the end
+        self.threads.append(threading.get_ident())
+        with self._counted:
+            self.in_flight += 1
+            self.max_in_flight = max(self.max_in_flight, self.in_flight)
+        self.barrier.wait()
+        with self._counted:
+            self.in_flight -= 1
+        return super().upload_file(*args, **kwargs)
 
 
 class FakeLibrary:
@@ -1083,11 +1132,12 @@ def test_scan_aborts_before_reading_the_library(tmp_path):
 
 
 def test_upload_all_stops_between_uploads_when_cancelled(tmp_path):
+    """A sequential pass (``upload_workers = 1``) never starts the next file."""
     graph = FakeGraph()
     library = FakeLibrary()
     _local_book(library, 1, "One", "Jane Doe")
     _local_book(library, 2, "Two", "Jane Doe")
-    settings = Settings(drive_id="drive", folder_id="folder")
+    settings = Settings(drive_id="drive", folder_id="folder", upload_workers=1)
     engine, state = make_engine(
         tmp_path,
         graph,
@@ -1104,6 +1154,92 @@ def test_upload_all_stops_between_uploads_when_cancelled(tmp_path):
     # The index is not rewritten once the run was cancelled.
     assert [call[2] for call in graph.uploaded] == ["Jane Doe - One (1).epub"]
     state.close()
+
+
+def test_upload_all_cancels_the_uploads_that_never_started(tmp_path):
+    """Concurrent uploads: queueing stops, the file in flight is not cut off."""
+    library = FakeLibrary()
+    _local_book(library, 1, "One", "Jane Doe")
+    _local_book(library, 2, "Two", "Jane Doe")
+    started = threading.Event()
+    release = threading.Event()
+    graph = GatingGraph(started, release)
+    settings = Settings(drive_id="drive", folder_id="folder", upload_workers=1)
+
+    def should_abort():
+        if not started.is_set():
+            return False
+        release.set()  # let the running upload finish, then stop the pass
+        return True
+
+    engine, state = make_engine(tmp_path, graph, library, settings, should_abort=should_abort)
+
+    result = engine.upload_all()
+
+    assert result.cancelled
+    assert result.exported == 0
+    assert [call[2] for call in graph.uploaded] == ["Jane Doe - One (1).epub"]
+    state.close()
+
+
+def test_uploads_run_in_parallel_up_to_the_configured_workers(tmp_path):
+    """Three workers mean three files on the wire, not three files per second."""
+    graph = ConcurrencyGraph(party=3)
+    library = FakeLibrary()
+    for book_id in range(1, 7):
+        _local_book(library, book_id, f"Book {book_id}", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder", upload_workers=3)
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    result = engine.upload_all()
+
+    assert result.exported == 6
+    assert result.failed == 0
+    assert graph.max_in_flight == 3
+    # The pool, not the caller's thread, performs the network requests.
+    assert threading.get_ident() not in graph.threads
+    state.close()
+
+
+def test_one_worker_uploads_exactly_one_file_at_a_time(tmp_path):
+    graph = ConcurrencyGraph(party=1)
+    library = FakeLibrary()
+    for book_id in range(1, 4):
+        _local_book(library, book_id, f"Book {book_id}", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder", upload_workers=1)
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    result = engine.upload_all()
+
+    assert result.exported == 3
+    assert graph.max_in_flight == 1
+    state.close()
+
+
+def test_the_sync_state_is_written_on_the_callers_thread(tmp_path):
+    """Calibre and SQLite stay serial; only Graph runs in the pool."""
+    graph = ConcurrencyGraph(party=2)
+    library = FakeLibrary()
+    for book_id in (1, 2):
+        _local_book(library, book_id, f"Book {book_id}", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder", upload_workers=2)
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    written = []
+    mark_exported = state.mark_exported
+
+    def spy(record):
+        written.append(threading.get_ident())
+        return mark_exported(record)
+
+    state.mark_exported = spy
+    try:
+        engine.upload_all()
+    finally:
+        state.close()
+
+    assert len(written) == 2
+    assert written == [threading.get_ident()] * 2
+    assert threading.get_ident() not in graph.threads
 
 
 def test_upload_all_reports_a_failing_upload(tmp_path):

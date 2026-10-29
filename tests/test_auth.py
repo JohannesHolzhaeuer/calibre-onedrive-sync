@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 from onedrive_sync.common import auth
@@ -127,3 +130,57 @@ def test_sign_out_and_invalidate():
     manager.sign_out()
     assert manager._token is None
     assert store.clear_calls == 1
+
+
+def test_a_refresh_a_waiting_worker_already_done_is_not_repeated(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        auth,
+        "refresh_access_token",
+        lambda *args, **kwargs: (
+            calls.append(1) or TokenSet(access_token="late", refresh_token="r", expires_in=3600)
+        ),
+    )
+    manager = AuthManager("client", Store("r"))
+    manager._lock.acquire()  # a parallel request is refreshing right now
+    results = []
+    worker = threading.Thread(target=lambda: results.append(manager.get_access_token()))
+    worker.start()
+    manager._install(TokenSet(access_token="fresh", refresh_token="r", expires_in=3600))
+    manager._lock.release()
+    worker.join(5)
+
+    assert results == ["fresh"]
+    assert calls == []
+
+
+def test_parallel_requests_share_one_token_refresh(monkeypatch):
+    gate = threading.Event()
+    calls = []
+
+    def fake_refresh(*args, **kwargs):
+        calls.append(1)
+        gate.wait(5)  # stay inside the lock while the other workers pile up
+        return TokenSet(access_token="access", refresh_token="r", expires_in=3600)
+
+    monkeypatch.setattr(auth, "refresh_access_token", fake_refresh)
+    manager = AuthManager("client", Store("r"))
+    tokens = []
+
+    def worker():
+        tokens.append(manager.get_access_token())
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    deadline = time.monotonic() + 5
+    while not calls and time.monotonic() < deadline:
+        time.sleep(0.01)
+    gate.set()
+    for thread in threads:
+        thread.join(5)
+
+    # Microsoft rotates refresh tokens, so a second concurrent refresh would
+    # invalidate the one the first request just stored.
+    assert len(calls) == 1
+    assert set(tokens) == {"access"}

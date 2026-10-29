@@ -7,6 +7,7 @@ available). It is the single entry point used by the Graph client and the GUI.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from typing import Protocol
@@ -50,25 +51,38 @@ class AuthManager:
         self._sleep = sleep
         self._clock = clock
         self._token: TokenSet | None = None
+        #: Guards the refresh path; Graph requests run in a worker pool.
+        self._lock = threading.Lock()
 
     def has_refresh_token(self) -> bool:
         """True when a refresh token is available (a session can be restored)."""
         return bool(self.token_store.get().strip())
 
     def get_access_token(self, *, force: bool = False) -> str:
-        """Return a valid access token, refreshing it when needed."""
-        if not force and self._token is not None and not self._token.is_expired():
-            return self._token.access_token
-        refresh_token = self.token_store.get()
-        if not refresh_token.strip():
-            raise NotSignedInError("Sign in to OneDrive first.")
-        token = refresh_access_token(
-            self.client_id,
-            refresh_token,
-            transport=self.transport,
-        )
-        self._install(token)
-        return token.access_token
+        """Return a valid access token, refreshing it when needed.
+
+        Parallel uploads share this manager, and Microsoft rotates refresh
+        tokens: two refreshes at once would burn the token the first one just
+        stored. The lock serialises the refresh, and a thread that had to wait
+        takes the token its predecessor fetched instead of refreshing again.
+        """
+        token = self._token
+        if not force and token is not None and not token.is_expired():
+            return token.access_token
+        with self._lock:
+            token = self._token
+            if not force and token is not None and not token.is_expired():
+                return token.access_token
+            refresh_token = self.token_store.get()
+            if not refresh_token.strip():
+                raise NotSignedInError("Sign in to OneDrive first.")
+            token = refresh_access_token(
+                self.client_id,
+                refresh_token,
+                transport=self.transport,
+            )
+            self._install(token)
+            return token.access_token
 
     def start_device_code(self) -> DeviceCode:
         """Start the device-code flow (the GUI displays the returned code)."""

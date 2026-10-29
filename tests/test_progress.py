@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from onedrive_sync.common.progress import (
@@ -201,3 +203,18 @@ def test_time_never_runs_backwards():
 def test_the_smoothing_weight_is_kept_in_a_useful_range():
     assert TransferMeter(alpha=99)._alpha == 1.0
     assert TransferMeter(alpha=-5)._alpha == pytest.approx(0.01)
+
+
+def test_bytes_from_parallel_workers_are_all_counted():
+    """Concurrent uploads share one meter; none of their bytes may get lost."""
+    meter = TransferMeter(total_bytes=100 * 1000)
+    workers = [
+        threading.Thread(target=lambda: [meter.add(100) for _ in range(100)]) for _ in range(8)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(10)
+
+    assert meter.transferred == 80_000
+    assert meter.fraction == pytest.approx(0.8)
