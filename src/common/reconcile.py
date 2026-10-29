@@ -227,6 +227,9 @@ class ReconcileEntry:
     local: LocalBook | None = None
     remote: RemoteItem | None = None
     note: str = ""
+    #: Per-file transfer report of this row, e.g. ``"12.4 MB/s · 2.1 s"``. Filled
+    #: by a sync pass, so the window can show what a single book cost.
+    transfer: str = ""
 
     @property
     def selectable(self) -> bool:

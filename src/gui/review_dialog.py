@@ -35,6 +35,8 @@ def _status_label(status: str) -> str:
         return _("Download to calibre")
     if status == "duplicate":
         return _("Delete OneDrive duplicate")
+    if status == "deleted":
+        return _("Deleted from OneDrive")
     if status == "local_only":
         return _("No EPUB/PDF")
     if status == "checking":
@@ -120,6 +122,7 @@ class ReviewDialog(QDialog):
                 _("calibre book"),
                 _("OneDrive file"),
                 _("Details"),
+                _("Transfer"),
             ]
         )
         self.tree.setRootIsDecorated(False)
@@ -205,7 +208,9 @@ class ReviewDialog(QDialog):
         self.tree.clear()
         for entry in plan.entries:
             self._add_entry(entry)
-        if self._scanning:
+        if self._busy():
+            # A running scan or transfer owns the status line; the progress
+            # message is the live one, so it wins over the phase text.
             self.status.setText(self._progress_message or self._progress_text(phase))
         else:
             self.status.setText(plan.summary())
@@ -245,6 +250,11 @@ class ReviewDialog(QDialog):
         if phase == "listing":
             return _("Listing OneDrive… {files} file(s) found so far.").format(
                 files=len(self.plan.remote_items)
+            )
+        if phase == "transfer":
+            return _("Transferring… {done} of {total} row(s) done.").format(
+                done=counts.get("matched", 0) + counts.get("deleted", 0),
+                total=len(self.plan.entries),
             )
         if phase == "library" or not self.plan.remote_items:
             return _("Found {count} book(s) in your library. Checking OneDrive…").format(
@@ -356,6 +366,7 @@ class ReviewDialog(QDialog):
                 local,
                 remote,
                 _entry_details(entry),
+                entry.transfer,
             ]
         )
         if entry.selectable:

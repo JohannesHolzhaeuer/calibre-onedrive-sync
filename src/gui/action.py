@@ -519,6 +519,7 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
             self._linker,
             self._apply_done.emit,
             description=_("Applying OneDrive changes"),
+            on_plan=self._scan_progress.emit,
             on_progress=self._scan_status.emit,
         )
         # Marks the window busy, so closing it kills the job like a cancelled
@@ -545,6 +546,7 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
             task,
             self._task_done.emit,
             description=self._task_description(task),
+            on_plan=self._scan_progress.emit,
             on_progress=self._scan_status.emit,
         )
         # Every path that starts a job owns the window's busy state, including

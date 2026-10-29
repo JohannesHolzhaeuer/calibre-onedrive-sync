@@ -195,9 +195,12 @@ access token is never written to disk.
   Uploading 12/80: Aaron Kahlau - Was uns falsch beigebracht wird (German Edition) · 4.5 MB/s · 8 min 12 s left
   ```
 
-  The same line goes to calibre's job log and to its status bar. Closing the
-  window stops the transfer. When the job ends, the window shows the summary and
-  scans the folder again, so the rows describe what is in OneDrive now.
+  The same line goes to calibre's job log and to its status bar. **The list keeps
+  up with it**: a row flips to *Already linked* the moment its file arrives, and
+  the **Transfer** column shows what that one book cost — `1.2 MB/s · 4 s` —
+  while the line above shows the rate of the whole pass. Closing the window stops
+  the transfer. When the job ends, the window shows the summary and scans the
+  folder again, so the rows describe what is in OneDrive now.
 - **Uploads run in parallel, imports do not**: the files go to OneDrive
   concurrently (see **Parallel uploads** above), because that time is mostly
   request latency. Downloads stay one by one, since adding a book to the calibre

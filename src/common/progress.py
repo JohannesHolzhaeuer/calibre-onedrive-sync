@@ -44,6 +44,16 @@ def format_rate(bytes_per_second: float) -> str:
     return f"{format_size(value)}/s"
 
 
+def format_transfer(count: float, seconds: float) -> str:
+    """One file's report, e.g. ``"12.4 MB/s · 2.1 s"``.
+
+    The per-file view of a transfer: the aggregate rate in the progress line says
+    how the pass goes, this says what a single book cost.
+    """
+    elapsed = max(0.001, float(seconds))
+    return f"{format_rate(max(0.0, float(count)) / elapsed)} · {format_duration(elapsed)}"
+
+
 def format_duration(seconds: float) -> str:
     """A duration as ``"45 s"``, ``"8 min 12 s"`` or ``"2 h 4 min"``."""
     whole = int(round(max(0.0, float(seconds))))

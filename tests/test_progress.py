@@ -12,6 +12,7 @@ from onedrive_sync.common.progress import (
     format_duration,
     format_rate,
     format_size,
+    format_transfer,
 )
 
 
@@ -48,6 +49,23 @@ def test_format_size_scales_to_a_readable_unit(count, expected):
 def test_format_rate_appends_per_second():
     assert format_rate(10 * 1024**2) == "10.0 MB/s"
     assert format_rate(-1) == "0 B/s"
+
+
+@pytest.mark.parametrize(
+    ("count", "seconds", "expected"),
+    [
+        (5 * 1024**2, 1.0, "5.0 MB/s · 1 s"),
+        (5 * 1024**2, 4.2, "1.2 MB/s · 4 s"),
+        (4096, 8.0, "512 B/s · 8 s"),
+        # A zero-byte file is still a file: the report stays readable.
+        (0, 2.0, "0 B/s · 2 s"),
+        # A response faster than the clock can measure never divides by zero.
+        (1024, 0, "1000.0 KB/s · 0 s"),
+        (1024, -1, "1000.0 KB/s · 0 s"),
+    ],
+)
+def test_format_transfer_reports_one_file(count, seconds, expected):
+    assert format_transfer(count, seconds) == expected
 
 
 @pytest.mark.parametrize(
