@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/compare/v0.4.0...v0.5.0) (2026-10-29)
+
+
+### Features
+
+* make syncing fully manual with an index-gated flat folder ([#24](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/24)) ([021c038](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/021c03890aa456c9d0e123240da3149a67f58119))
+* report every transferred book in the review list ([#30](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/30)) ([8c85b18](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/8c85b18bbc44e0a46bafeeab31b6e6a36c89a276))
+* report transfer speed and time left in the review window ([#27](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/27)) ([02f20c9](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/02f20c98055a68e3d46ca880afe3a720cc528719))
+* upload several books at the same time ([#28](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/28)) ([85a42ac](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/85a42aca083b21dd43f74752de3433fa4f7f557e))
+* write the index while the transfer runs ([#29](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/29)) ([3ca5160](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/3ca5160c3fbc53686c83fd1ab753b3d30b11487f))
+
+
+### Tests
+
+* cover every line of the manual sync rework ([#26](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/26)) ([69756b6](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/69756b6537aeeb6a04f175af70ab889d62f94a6f))
+
 ## [0.4.0](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/compare/v0.3.0...v0.4.0) (2026-10-26)
 
 
