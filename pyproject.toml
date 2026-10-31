@@ -4,7 +4,7 @@ description = "A calibre plugin that syncs the library with a OneDrive folder."
 authors = [{ name = "Johannes Holzhaeuer" }]
 readme = "README.md"
 requires-python = ">=3.11"
-version = "0.5.0"
+version = "0.6.0"
 
 [project.optional-dependencies]
 dev = [

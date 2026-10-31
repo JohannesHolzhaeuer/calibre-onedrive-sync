@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/compare/v0.5.0...v0.6.0) (2026-10-31)
+
+
+### Features
+
+* upload newly added books automatically ([#31](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/31)) ([b34ac47](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/b34ac4704edd567290df396db29c8b8243ce503c))
+
 ## [0.5.0](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/compare/v0.4.0...v0.5.0) (2026-10-29)
 
 
