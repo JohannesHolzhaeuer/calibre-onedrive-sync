@@ -11,6 +11,9 @@ children of the selected folder, never at subfolders.
   :meth:`SyncEngine.clear_backup` back the review window's bulk actions.
 * :meth:`SyncEngine.index_available` tells the action whether the folder already
   carries a usable ``calibre-onedrive-index.json``.
+* :meth:`SyncEngine.upload_books` uploads the books calibre has just added. It is
+  the one path that does not run from the review window, and it only ever sends
+  the newly created books it is handed.
 
 Files are always uploaded into the selected folder itself (no export
 subfolder), so the index and every stored book live in the same flat folder.
@@ -36,7 +39,7 @@ from .errors import CancelledError, GraphError, SyncError
 from .i18n import _
 from .index import INDEX_FILENAME, BookIndex, build_index
 from .log import get_logger
-from .models import BookLink, ExportRecord, RemoteItem, SyncResult
+from .models import ONEDRIVE_IDENTIFIER, BookLink, ExportRecord, RemoteItem, SyncResult
 from .progress import TransferMeter, format_transfer
 from .reconcile import (
     IMPORT_EXTENSIONS,
@@ -101,6 +104,11 @@ class UploadJob:
     seconds: float = 0.0
 
 
+def _import_unavailable(_path: str) -> int | None:
+    """The adder of a pass that can never import a book (e.g. an upload pass)."""
+    raise SyncError("This OneDrive pass does not import books.")
+
+
 def sanitize_filename(text: str, *, limit: int = 120) -> str:
     """Make ``text`` safe as a single file/folder name on Windows and OneDrive."""
     cleaned = _INVALID_FILENAME.sub("_", str(text or ""))
@@ -126,7 +134,7 @@ class SyncEngine:
         library: Library,
         settings: Settings,
         *,
-        add_book: Callable[[str], int | None],
+        add_book: Callable[[str], int | None] | None = None,
         link_book: Callable[[BookLink], None] | None = None,
         metadata_reader: Callable[[str, str], tuple[str, str] | None] | None = None,
         on_progress: Callable[[float, str], None] | None = None,
@@ -139,7 +147,7 @@ class SyncEngine:
         self.state = state
         self.library = library
         self.settings = settings
-        self.add_book = add_book
+        self.add_book = add_book or _import_unavailable
         self.link_book = link_book
         self.metadata_reader = metadata_reader
         self.on_progress = on_progress
@@ -275,6 +283,36 @@ class SyncEngine:
         uploads = [entry for entry in plan.entries if entry.status == "upload"]
         meter = TransferMeter(self._upload_bytes(uploads), self.clock)
         self._upload_entries(uploads, result, meter, plan=plan)
+        self._flush_index(result)
+        self._report(1.0, result.summary())
+        return result
+
+    def upload_books(self, book_ids: list[int]) -> SyncResult:
+        """Upload only these books; the add-books hook calls this.
+
+        A book calibre has just created is known by its id, so nothing is listed:
+        the selected folder is addressed directly and the index is rewritten from
+        the sync state. Books that already carry a OneDrive link are skipped,
+        which is what keeps a book imported *from* OneDrive from being uploaded
+        back as a second copy — an import links the book right after adding it.
+        """
+        result = SyncResult()
+        if self._aborted():
+            result.cancelled = True
+            result.errors.append("Sync cancelled.")
+            return result
+
+        entries = [
+            entry
+            for entry in (self._new_book_entry(book_id) for book_id in book_ids)
+            if entry is not None
+        ]
+        if not entries:
+            log.info("No new book needs uploading to OneDrive")
+            return result
+
+        meter = TransferMeter(self._upload_bytes(entries), self.clock)
+        self._upload_entries(entries, result, meter)
         self._flush_index(result)
         self._report(1.0, result.summary())
         return result
@@ -485,6 +523,30 @@ class SyncEngine:
         if not os.path.isfile(dest):
             raise SyncError(f"Download produced no file for {item.name}.")
         return dest
+
+    # -- newly added books --------------------------------------------------
+
+    def _new_book_entry(self, book_id: int) -> ReconcileEntry | None:
+        """The upload row for one freshly added book, or ``None`` when it is done.
+
+        A link already in the sync state means the book is in the folder, and
+        that check is what makes the automatic upload safe to repeat: a pass
+        deferred behind a manual job sees the links the job just wrote.
+        """
+        book_id = int(book_id)
+        if self.state.get_link(book_id) is not None:
+            log.info("Book %s is already in OneDrive; not uploading it again", book_id)
+            return None
+        try:
+            book = self._local_book(book_id)
+        except Exception:  # noqa: BLE001 - one broken book must not stop the pass
+            log.warning("Could not read book %s for the OneDrive upload", book_id, exc_info=True)
+            return None
+        if book.identifiers.get(ONEDRIVE_IDENTIFIER):
+            # The calibre identifier outlives a wiped sync state; honour it too.
+            log.info("Book %s already carries a OneDrive link", book_id)
+            return None
+        return ReconcileEntry(key=f"local:{book_id}", status="upload", local=book)
 
     # -- review helpers -----------------------------------------------------
 

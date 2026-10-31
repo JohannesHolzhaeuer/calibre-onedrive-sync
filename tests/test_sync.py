@@ -2094,3 +2094,142 @@ def test_rows_the_plan_does_not_contain_are_not_published(tmp_path):
     assert plan.entries == [kept]
     assert phases == ["transfer"]
     state.close()
+
+
+# -- automatic upload of newly added books ------------------------------------
+
+
+def test_upload_books_sends_only_the_books_it_is_handed(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    _local_book(library, 1, "Old", "Jane Doe")
+    _local_book(library, 2, "Fresh", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    result = engine.upload_books([2])
+
+    assert result.exported == 1
+    assert graph.list_calls == []  # a new book is addressed, never searched for
+    assert [call[2] for call in graph.uploaded] == [
+        "Jane Doe - Fresh (2).epub",
+        INDEX_FILENAME,
+    ]
+    assert state.get_link(2).name == "Jane Doe - Fresh (2).epub"
+    assert state.get_link(1) is None
+    assert state.get_export(2, "epub") is not None
+    assert json.loads(graph.uploaded_bytes[INDEX_FILENAME])["books"][0]["book_id"] == 2
+    state.close()
+
+
+def test_upload_books_skips_a_book_that_is_already_linked(tmp_path):
+    """A book imported from OneDrive is linked by the time the upload runs."""
+    graph = FakeGraph()
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    state.link_book(BookLink(book_id=1, drive_id="drive", item_id="a", name="a.epub"))
+
+    result = engine.upload_books([1])
+
+    assert result.exported == 0
+    assert graph.uploaded == []
+    assert state.get_link(1).item_id == "a"
+    state.close()
+
+
+def test_upload_books_honours_the_calibre_identifier(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    library.identifiers_map[1] = {"onedrive": "https://onedrive.test/item"}
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    result = engine.upload_books([1])
+
+    assert result.exported == 0
+    assert graph.uploaded == []
+    state.close()
+
+
+def test_upload_books_ignores_a_book_it_cannot_read(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+
+    def broken(_book_id):
+        raise KeyError("gone")
+
+    library.title = broken
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    result = engine.upload_books([9])
+
+    assert result.exported == 0
+    assert graph.uploaded == []
+    state.close()
+
+
+def test_upload_books_skips_a_book_without_a_syncable_format(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    _local_book(library, 1, "Mobi only", "Jane Doe", fmt="mobi")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    result = engine.upload_books([1])
+
+    assert (result.exported, result.skipped) == (0, 1)
+    assert graph.uploaded == []
+    state.close()
+
+
+def test_upload_books_stops_before_any_request_when_cancelled(tmp_path):
+    graph = FakeGraph()
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+    engine.should_abort = lambda: True
+
+    result = engine.upload_books([1])
+
+    assert result.cancelled
+    assert graph.uploaded == []
+    assert graph.get_item_calls == []
+    state.close()
+
+
+def test_upload_books_counts_a_failing_index_write(tmp_path):
+    graph = FailingIndexGraph()
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings)
+
+    result = engine.upload_books([1])
+
+    assert result.exported == 1
+    assert result.failed == 1
+    assert "OneDrive index" in result.errors[0]
+    state.close()
+
+
+def test_an_engine_without_an_adder_refuses_to_import(tmp_path):
+    """The automatic pass only uploads; it can never add a book to calibre."""
+    graph = FakeGraph()
+    graph.recursive = [remote("a", "Jane Doe - The Book.epub", size=4)]
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    state = StateStore(str(tmp_path / "state.sqlite"))
+    engine = SyncEngine(graph, state, library, settings)
+
+    result = engine.download_all()
+
+    assert result.failed == 1
+    assert "does not import books" in result.errors[0]
+    assert state.get_link(1) is None
+    state.close()

@@ -1640,3 +1640,483 @@ def test_the_next_click_releases_a_dead_job_reference(monkeypatch):
     assert called == [1]
     assert action._job is None
     assert action._state is None
+
+
+# -- automatic upload of newly added books ------------------------------------
+
+
+class FakeEvent:
+    """Stand-in for ``calibre.db.listeners.EventType`` (matched by ``name``)."""
+
+    def __init__(self, name):
+        self.name = name
+
+
+class FakeCache:
+    """The listener API of calibre's ``gui.current_db.new_api``."""
+
+    def __init__(self):
+        self.listeners = []
+        self.removed = []
+
+    def add_listener(self, callback):
+        self.listeners.append(callback)
+
+    def remove_listener(self, callback):
+        self.removed.append(callback)
+        self.listeners.remove(callback)
+
+    def create_book(self, book_id):
+        for listener in list(self.listeners):
+            listener(FakeEvent("book_created"), "library", (book_id,))
+
+
+def auto_settings(**overrides):
+    values = {"client_id": "c", "drive_id": "d", "folder_id": "f", "folder_path": "/Books"}
+    values.update(overrides)
+    return Settings(**values)
+
+
+def auto_action(monkeypatch, *, api=None, settings=None, token="refresh"):
+    """An action whose ``genesis`` runs with a configured plugin."""
+    monkeypatch.setattr(action_mod, "get_icons", lambda *_args: "icon", raising=False)
+    monkeypatch.setattr(action_mod, "load_settings", lambda: settings or auto_settings())
+    monkeypatch.setattr(
+        action_mod, "is_configured", lambda current: bool(current.drive_id and current.folder_id)
+    )
+    monkeypatch.setattr(action_mod, "get_refresh_token", lambda: token)
+    gui = FakeGui()
+    gui.current_db = types.SimpleNamespace(
+        new_api=api if api is not None else FakeCache(), library_path="C:/Books"
+    )
+    action = OneDriveSyncInterfaceAction(gui)
+    action.genesis()
+    return action
+
+
+def auto_job_recorder(monkeypatch, action):
+    """Install a recording stand-in for the automatic upload job."""
+    started = []
+
+    def start(manager, engine, book_ids, callback, *, description=None):
+        started.append(
+            {"manager": manager, "engine": engine, "ids": list(book_ids), "callback": callback}
+        )
+        return "auto-job"
+
+    monkeypatch.setattr(action_mod, "start_upload_books_job", start)
+    monkeypatch.setattr(action, "_prepare_auto_engine", lambda _settings: True)
+    action._auto_engine = "auto-engine"
+    return started
+
+
+def auto_job(**overrides):
+    """A finished job object shaped like a calibre ``ThreadedJob``."""
+    values = {
+        "failed": False,
+        "exception": None,
+        "result": SyncResult(exported=1),
+        "killed": False,
+        "abort": threading.Event(),
+        "duration": 0.5,
+        "worker_active": False,
+    }
+    values.update(overrides)
+    return types.SimpleNamespace(**values)
+
+
+def test_genesis_watches_the_database_when_the_plugin_is_set_up(monkeypatch):
+    cache = FakeCache()
+    action = auto_action(monkeypatch, api=cache)
+    assert action._auto_watcher is not None
+    assert len(cache.listeners) == 1
+    action.shutting_down()
+
+
+def test_no_watcher_without_a_configured_folder(monkeypatch):
+    monkeypatch.setattr(action_mod, "get_icons", lambda *_args: "icon", raising=False)
+    monkeypatch.setattr(action_mod, "load_settings", lambda: Settings())
+    monkeypatch.setattr(action_mod, "is_configured", lambda _settings: False)
+    monkeypatch.setattr(action_mod, "get_refresh_token", lambda: "refresh")
+
+    action = OneDriveSyncInterfaceAction(FakeGui())
+    action.genesis()
+
+    assert action._auto_watcher is None
+
+
+def test_no_watcher_without_a_signed_in_account(monkeypatch):
+    action = auto_action(monkeypatch, token="")
+
+    assert action._auto_watcher is None
+    assert action._auto_upload_enabled() is False
+
+
+def test_a_missing_database_is_survived(monkeypatch):
+    monkeypatch.setattr(action_mod, "get_icons", lambda *_args: "icon", raising=False)
+    monkeypatch.setattr(action_mod, "load_settings", lambda: auto_settings())
+    monkeypatch.setattr(action_mod, "is_configured", lambda _settings: True)
+    monkeypatch.setattr(action_mod, "get_refresh_token", lambda: "refresh")
+    gui = FakeGui()
+    gui.current_db = types.SimpleNamespace()  # no new_api at all
+
+    action = OneDriveSyncInterfaceAction(gui)
+    action.genesis()
+
+    assert action._auto_watcher is None
+
+
+def test_a_calibre_without_listeners_leaves_the_hook_off(monkeypatch):
+    action = auto_action(monkeypatch, api=types.SimpleNamespace())
+
+    assert action._auto_watcher is None
+
+
+def test_accepting_the_settings_installs_the_watcher(monkeypatch):
+    monkeypatch.setattr(action_mod, "get_icons", lambda *_args: "icon", raising=False)
+    monkeypatch.setattr(action_mod, "load_settings", lambda: Settings())
+    monkeypatch.setattr(action_mod, "is_configured", lambda _settings: False)
+    monkeypatch.setattr(action_mod, "get_refresh_token", lambda: "refresh")
+    action = OneDriveSyncInterfaceAction(FakeGui())
+    action.genesis()
+    assert action._auto_watcher is None
+
+    cache = FakeCache()
+    action.gui.current_db = types.SimpleNamespace(new_api=cache, library_path="C:/Books")
+    monkeypatch.setattr(action_mod, "load_settings", lambda: auto_settings())
+    monkeypatch.setattr(action_mod, "is_configured", lambda _settings: True)
+    monkeypatch.setattr(action_mod, "open_config_dialog", lambda _parent: True)
+
+    assert action.open_config() is True
+    assert action._auto_watcher is not None
+
+    action._install_auto_upload()  # a second click must not register a second listener
+    assert len(cache.listeners) == 1
+
+    action.shutting_down()
+
+
+def test_a_book_added_to_calibre_is_uploaded_automatically(monkeypatch):
+    cache = FakeCache()
+    action = auto_action(monkeypatch, api=cache)
+    started = auto_job_recorder(monkeypatch, action)
+
+    cache.create_book(42)
+    assert len(action._auto_queue) == 1
+    assert action._auto_timer.isActive()
+
+    action._upload_new_books()
+
+    assert started[0]["ids"] == [42]
+    assert started[0]["engine"] == "auto-engine"
+    assert started[0]["callback"] == action._auto_upload_done.emit
+    assert action._auto_job == "auto-job"
+    assert not action._auto_queue
+    assert "1 new book(s)" in action.gui.status_bar.messages[-1]
+
+
+def test_a_whole_import_becomes_one_upload_batch(monkeypatch):
+    cache = FakeCache()
+    action = auto_action(monkeypatch, api=cache)
+    started = auto_job_recorder(monkeypatch, action)
+
+    for book_id in (1, 2, 3):
+        cache.create_book(book_id)
+    cache.create_book(2)  # calibre reports a book once; a repeat must not double it
+
+    assert len(action._auto_queue) == 3
+    action._upload_new_books()
+
+    assert started[0]["ids"] == [1, 2, 3]
+
+
+def test_the_batch_waits_for_a_running_manual_job(monkeypatch):
+    cache = FakeCache()
+    action = auto_action(monkeypatch, api=cache)
+    started = auto_job_recorder(monkeypatch, action)
+    cache.create_book(7)
+
+    action._job = object()  # a manual pass owns the state
+    action._upload_new_books()
+
+    assert started == []
+    assert len(action._auto_queue) == 1
+    assert action._auto_timer.isActive()
+
+
+def test_the_setting_switches_the_automatic_upload_off(monkeypatch):
+    cache = FakeCache()
+    action = auto_action(monkeypatch, api=cache)
+    started = auto_job_recorder(monkeypatch, action)
+    monkeypatch.setattr(
+        action_mod, "load_settings", lambda: auto_settings(auto_upload_new_books=False)
+    )
+
+    assert action._auto_upload_enabled() is False
+    cache.create_book(8)
+    action._upload_new_books()
+
+    assert started == []
+    assert not action._auto_queue
+    assert action._auto_job is None
+
+
+def test_a_failing_engine_setup_drops_the_batch(monkeypatch):
+    cache = FakeCache()
+    action = auto_action(monkeypatch, api=cache)
+    monkeypatch.setattr(action_mod, "CalibreLibrary", lambda _gui: 1 / 0)
+    cache.create_book(9)
+
+    action._upload_new_books()
+
+    assert action._auto_job is None
+    assert not action._auto_queue
+    assert action._auto_state is None
+
+
+def test_a_manual_pass_stops_a_running_automatic_upload(monkeypatch):
+    action = auto_action(monkeypatch)
+    job = auto_job(duration=None)
+    action._auto_job = job
+
+    action._abort_auto_upload()
+
+    assert job.abort.is_set()
+
+
+def test_a_toolbar_click_installs_the_hook_and_stops_the_auto_upload(monkeypatch):
+    action = auto_action(monkeypatch)
+    job = auto_job(duration=None)
+    action._auto_job = job
+    calls = []
+    monkeypatch.setattr(action, "_install_auto_upload", lambda: calls.append("install"))
+    monkeypatch.setattr(action, "_prepare_engine", lambda _settings: False)
+
+    action.review_now()
+
+    assert calls == ["install"]
+    assert job.abort.is_set()
+
+
+def test_review_rows_stop_the_automatic_upload_first(monkeypatch):
+    action = review_action(monkeypatch)
+
+    class FakeDialog:
+        def selected_entries(self):
+            return [object()]
+
+        def start_task(self, _task):
+            pass
+
+    action._review_dialog = FakeDialog()
+    action._scan_plan = sample_plan()
+    job = auto_job(duration=None)
+    action._auto_job = job
+    monkeypatch.setattr(action_mod, "start_apply_job", lambda *_args, **_kwargs: "apply-job")
+
+    action._apply_selected()
+
+    assert job.abort.is_set()
+    assert action._job == "apply-job"
+
+
+def test_a_bulk_action_stops_the_automatic_upload_first(monkeypatch):
+    action = make_action(monkeypatch)
+    job = auto_job(duration=None)
+    action._auto_job = job
+    monkeypatch.setattr(action_mod, "start_task_job", lambda *_args, **_kwargs: "task-job")
+    monkeypatch.setattr(action, "_show_status", lambda _message: None)
+
+    action._start_task("upload_all")
+
+    assert job.abort.is_set()
+    assert action._job == "task-job"
+
+
+def test_a_finished_automatic_upload_is_reported_in_the_status_bar(monkeypatch):
+    action = auto_action(monkeypatch)
+    infos = []
+    monkeypatch.setattr(action_mod.QMessageBox, "information", lambda *args: infos.append(args))
+    state = FakeState()
+    action._auto_state = state
+    job = auto_job()
+    action._auto_job = job
+
+    action._on_auto_upload_done(job)
+
+    assert infos == []  # a background pass never opens a window or a dialog
+    assert state.closed == 1
+    assert action._auto_job is None
+    assert action._auto_state is None
+    assert action.gui.status_bar.messages[-1] == job.result.summary()
+
+
+def test_a_failed_automatic_upload_is_only_logged(monkeypatch):
+    action = auto_action(monkeypatch)
+    warnings = []
+    monkeypatch.setattr(action_mod.QMessageBox, "warning", lambda *args: warnings.append(args))
+    job = auto_job(failed=True, exception=RuntimeError("offline"), result=None)
+    action._auto_job = job
+
+    action._on_auto_upload_done(job)
+
+    assert warnings == []
+    assert "offline" in action.gui.status_bar.messages[-1]
+
+
+def test_a_cancelled_automatic_upload_is_not_a_failure(monkeypatch):
+    action = auto_action(monkeypatch)
+    job = auto_job(failed=True, killed=True, result=None)
+    action._auto_job = job
+
+    action._on_auto_upload_done(job)
+
+    assert action.gui.status_bar.messages[-1] == "Automatic OneDrive upload cancelled."
+
+
+def test_automatic_upload_errors_are_logged_with_the_summary(monkeypatch):
+    action = auto_action(monkeypatch)
+    result = SyncResult(failed=1, errors=["book: boom"])
+    job = auto_job(result=result)
+    action._auto_job = job
+
+    action._on_auto_upload_done(job)
+
+    assert action.gui.status_bar.messages[-1] == result.summary()
+
+
+def test_an_automatic_upload_without_a_result_ends_quietly(monkeypatch):
+    action = auto_action(monkeypatch)
+    job = auto_job(result=None)
+    action._auto_job = job
+    before = list(action.gui.status_bar.messages)
+
+    action._on_auto_upload_done(job)
+
+    assert action.gui.status_bar.messages == before
+    assert action._auto_job is None
+
+
+def test_a_late_automatic_callback_is_ignored(monkeypatch):
+    action = auto_action(monkeypatch)
+    action._auto_job = "current"
+
+    action._on_auto_upload_done(auto_job())
+    action._on_auto_upload_done(None)
+
+    assert action._auto_job == "current"
+
+
+def test_an_empty_batch_does_nothing(monkeypatch):
+    action = auto_action(monkeypatch)
+    started = auto_job_recorder(monkeypatch, action)
+
+    action._upload_new_books()
+
+    assert started == []
+    assert action._auto_job is None
+    assert action._auto_timer.isActive() is False
+
+
+def test_a_callback_without_a_job_ends_quietly(monkeypatch):
+    action = auto_action(monkeypatch)
+
+    action._on_auto_upload_done(None)
+
+    assert action._auto_job is None
+    assert action._auto_state is None
+
+
+def test_an_open_review_window_is_scanned_again(monkeypatch):
+    action = auto_action(monkeypatch)
+    started = []
+    monkeypatch.setattr(action, "_start_scan", lambda: started.append(1))
+    action._review_dialog = object()
+    action._engine = object()
+
+    action._auto_job = job = auto_job()
+    action._on_auto_upload_done(job)
+    assert started == [1]
+
+    # A manual job is running: the window refreshes with that job's own pass.
+    started.clear()
+    action._auto_job = job
+    action._job = object()
+    action._on_auto_upload_done(job)
+    assert started == []
+
+
+def test_a_finished_automatic_job_is_released(monkeypatch):
+    action = auto_action(monkeypatch)
+    action._auto_state = FakeState()
+    running = auto_job(duration=None)
+
+    action._auto_job = running
+    action._clear_finished_auto_job()
+    assert action._auto_job is running
+
+    action._auto_job = auto_job()
+    action._clear_finished_auto_job()
+    assert action._auto_job is None
+    assert action._auto_state is None
+
+
+def test_prepare_auto_engine_builds_a_private_engine(monkeypatch, tmp_path):
+    action = make_action(monkeypatch)
+    logged = []
+    state_path = str(tmp_path / "state.sqlite")
+    monkeypatch.setattr(action_mod, "configure_logging", lambda debug: logged.append(debug))
+    monkeypatch.setattr(action_mod, "default_state_path", lambda: state_path)
+
+    assert action._prepare_auto_engine(Settings(client_id="client", debug=True)) is True
+
+    assert logged == [True]
+    assert action._auto_state.path == state_path
+    assert action._auto_engine.state is action._auto_state
+    assert action._auto_library is not None
+    assert action._state is None  # the manual state is never touched
+
+    action._close_auto_state()
+    assert action._auto_state is None
+    assert action._auto_engine is None
+    assert action._auto_library is None
+
+
+def test_prepare_auto_engine_reports_nothing(monkeypatch):
+    action = make_action(monkeypatch)
+    warnings = []
+    monkeypatch.setattr(action_mod.QMessageBox, "warning", lambda *args: warnings.append(args))
+    monkeypatch.setattr(action_mod, "CalibreLibrary", lambda _gui: 1 / 0)
+
+    assert action._prepare_auto_engine(Settings(client_id="c")) is False
+
+    assert warnings == []
+    assert action._auto_state is None
+
+
+def test_closing_the_automatic_state_survives_a_dead_database(monkeypatch):
+    action = make_action(monkeypatch)
+
+    class BrokenState:
+        def close(self):
+            raise RuntimeError("already closed")
+
+    action._auto_state = BrokenState()
+
+    action._close_auto_state()
+
+    assert action._auto_state is None
+
+
+def test_shutting_down_stops_watching(monkeypatch):
+    cache = FakeCache()
+    action = auto_action(monkeypatch, api=cache)
+    action._auto_queue.add(1)
+    action._auto_timer.start()
+
+    action.shutting_down()
+
+    assert action._auto_watcher is None
+    assert cache.removed
+    assert not action._auto_queue
+    assert action._auto_timer.isActive() is False

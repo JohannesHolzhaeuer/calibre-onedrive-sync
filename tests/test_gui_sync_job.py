@@ -15,10 +15,12 @@ from onedrive_sync.gui.sync_job import (
     MainThreadBookLinker,
     ScanJob,
     TaskJob,
+    UploadBooksJob,
     start_apply_job,
     start_index_job,
     start_scan_job,
     start_task_job,
+    start_upload_books_job,
 )
 
 
@@ -72,10 +74,16 @@ class FakeReviewEngine:
         self.applied = None
         self.has_index = True
         self.index_checked = False
+        self.uploaded_ids = None
 
     def index_available(self):
         self.index_checked = True
         return self.has_index
+
+    def upload_books(self, book_ids):
+        self.uploaded_ids = list(book_ids)
+        self.on_progress(0.5, "upload")
+        return self.result
 
     def scan(self):
         self.scanned = True
@@ -538,3 +546,45 @@ def test_the_task_and_apply_factories_forward_the_plan_callback():
     assert task._on_plan is marker
     assert apply._on_plan is marker
     assert manager.jobs == [task, apply]
+
+
+def test_upload_books_job_uploads_the_given_books():
+    engine = FakeReviewEngine()
+    done = []
+    job = UploadBooksJob(engine, ["4", 5], done.append, description="Upload")
+
+    job.start_work()
+
+    assert job.result is engine.result
+    assert engine.uploaded_ids == [4, 5]
+    assert callable(engine.should_abort)
+    assert done == [job]
+    assert job.killable
+
+
+def test_upload_books_job_logs_the_errors_of_the_pass():
+    engine = FakeReviewEngine()
+    engine.result = SyncResult(failed=1, errors=["book: boom"])
+    job = UploadBooksJob(engine, [1], lambda _job: None, description="Upload")
+
+    job.start_work()
+
+    assert job.result is engine.result
+
+
+def test_start_upload_books_job_enqueues():
+    class Manager:
+        def __init__(self):
+            self.jobs = []
+
+        def run_threaded_job(self, job):
+            self.jobs.append(job)
+
+    manager = Manager()
+    engine = FakeReviewEngine()
+
+    job = start_upload_books_job(manager, engine, [3], lambda _job: None)
+
+    assert manager.jobs == [job]
+    assert job.engine is engine
+    assert job.book_ids == [3]
