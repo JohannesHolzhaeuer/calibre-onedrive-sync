@@ -96,7 +96,8 @@ class ConfigWidget(QWidget):
                 "Everything is manual: the toolbar button lets you pick a folder, "
                 "checks for a calibre index and then opens the review window. "
                 "Books are uploaded directly into the selected folder; subfolders "
-                "are never read."
+                "are never read. The one exception is the upload of books calibre "
+                "has just added, which can be switched off below."
             )
         )
         footer.setWordWrap(True)
@@ -126,6 +127,18 @@ class ConfigWidget(QWidget):
         )
         workers_help.setWordWrap(True)
         layout.addWidget(workers_help)
+
+        self.auto_upload = QCheckBox(_("Upload newly added books automatically"))
+        layout.addWidget(self.auto_upload)
+        auto_help = QLabel(
+            _(
+                "When calibre adds a book, it is uploaded to the selected folder "
+                "right away, in the background, without opening the review window. "
+                "Turn this off to keep every upload behind an explicit click."
+            )
+        )
+        auto_help.setWordWrap(True)
+        layout.addWidget(auto_help)
 
         self.debug = QCheckBox(_("Debug (verbose logging)"))
         layout.addWidget(self.debug)
@@ -157,6 +170,7 @@ class ConfigWidget(QWidget):
         index = self.export_format.findData(settings.export_format or DEFAULT_EXPORT_FORMAT)
         self.export_format.setCurrentIndex(index if index >= 0 else 0)
         self.upload_workers.setValue(settings.upload_workers)
+        self.auto_upload.setChecked(settings.auto_upload_new_books)
         self.debug.setChecked(settings.debug)
         self._refresh_auth_status()
         self._refresh_folder_label()
@@ -175,6 +189,7 @@ class ConfigWidget(QWidget):
             "folder_name": folder.name if folder else "",
             "export_format": self.export_format.currentData() or DEFAULT_EXPORT_FORMAT,
             "upload_workers": self.upload_workers.value(),
+            "auto_upload_new_books": self.auto_upload.isChecked(),
             "debug": self.debug.isChecked(),
         }
 

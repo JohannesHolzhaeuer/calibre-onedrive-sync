@@ -192,6 +192,37 @@ class TaskJob(OneDriveJob):
             pass
 
 
+class UploadBooksJob(OneDriveJob):
+    """A ``ThreadedJob`` that uploads the books calibre has just added.
+
+    The automatic upload goes through the same engine pass as the review window,
+    so links, export records and the index are written exactly the same way; only
+    the entry point differs: a list of book ids instead of a scan.
+    """
+
+    def __init__(
+        self,
+        engine: SyncEngine,
+        book_ids,
+        callback,
+        *,
+        description: str | None = None,
+    ) -> None:
+        self.engine = engine
+        self.book_ids = [int(book_id) for book_id in book_ids]
+        super().__init__(description or _("Uploading new books to OneDrive"), callback)
+
+    def _run(self, notifications, abort, log):
+        self.engine.should_abort = abort.is_set
+        self.engine.on_progress = lambda fraction, message: notifications.put((fraction, message))
+        log(f"Uploading {len(self.book_ids)} new book(s) to {_location(self.engine)}")
+        result = self.engine.upload_books(self.book_ids)
+        log(result.summary())
+        for message in result.errors:
+            log(message)
+        return result
+
+
 class ApplyJob(OneDriveJob):
     """A ``ThreadedJob`` that executes the rows selected in the review dialog."""
 
@@ -275,6 +306,20 @@ def start_task_job(
         on_plan=on_plan,
         on_progress=on_progress,
     )
+    job_manager.run_threaded_job(job)
+    return job
+
+
+def start_upload_books_job(
+    job_manager,
+    engine: SyncEngine,
+    book_ids,
+    callback,
+    *,
+    description=None,
+):
+    """Create and enqueue an :class:`UploadBooksJob`; returns the job."""
+    job = UploadBooksJob(engine, book_ids, callback, description=description)
     job_manager.run_threaded_job(job)
     return job
 

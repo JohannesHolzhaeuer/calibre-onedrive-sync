@@ -269,3 +269,12 @@ def test_open_config_cancelled(monkeypatch):
     monkeypatch.setattr(config_widget, "load_settings", lambda: base_settings())
     monkeypatch.setattr(config_widget, "get_refresh_token", lambda: "refresh")
     assert not open_config()
+
+
+def test_the_auto_upload_box_round_trips_the_setting(monkeypatch):
+    widget = widget_with(monkeypatch, settings=base_settings(auto_upload_new_books=False))
+    assert widget.auto_upload.isChecked() is False
+    assert widget.fields()["auto_upload_new_books"] is False
+
+    widget.auto_upload.setChecked(True)
+    assert widget.fields()["auto_upload_new_books"] is True

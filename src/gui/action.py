@@ -1,19 +1,28 @@
 """OneDrive Sync InterfaceAction: the toolbar button drives everything.
 
-The plugin never syncs on its own. A click uses the configured OneDrive folder,
-checks whether that folder already carries a usable calibre index and then
-either opens the matching window or offers to clear the folder and upload the
-whole library with a fresh index. The folder picker only appears when no folder
-is configured, that is in the setup flow and when the settings dialog is opened
-from the toolbar. Only the direct children of the selected folder are ever read.
+Nothing is scanned, downloaded or cleaned up on its own. A click uses the
+configured OneDrive folder, checks whether that folder already carries a usable
+calibre index and then either opens the matching window or offers to clear the
+folder and upload the whole library with a fresh index. The folder picker only
+appears when no folder is configured, that is in the setup flow and when the
+settings dialog is opened from the toolbar. Only the direct children of the
+selected folder are ever read.
+
+The single automatic path is the add-books hook: ``genesis`` registers a
+:class:`~onedrive_sync.gui.library_watch.LibraryWatcher` on calibre's database,
+and a book calibre just created is uploaded on its own (see
+``_upload_new_books``). Everything that hook does is visible in calibre's job
+panel and in the status bar, and the *Upload newly added books* setting turns it
+off again.
 """
 
 from __future__ import annotations
 
 from calibre.gui2.actions import InterfaceAction
-from qt.core import QDialog, QMessageBox, pyqtSignal
+from qt.core import QDialog, QMessageBox, Qt, QTimer, pyqtSignal
 
 from ..common.auth import AuthManager
+from ..common.auto_upload import AUTO_UPLOAD_DELAY_MS, BookUploadQueue
 from ..common.config import (
     ConfigTokenStore,
     get_refresh_token,
@@ -31,6 +40,7 @@ from ..common.sync import SyncEngine
 from .config_widget import open_config as open_config_dialog
 from .folder_picker import open_folder_picker
 from .library import CalibreLibrary, add_book_to_library, read_metadata
+from .library_watch import LibraryWatcher
 from .review_dialog import ReviewDialog
 from .sync_job import (
     MainThreadBookAdder,
@@ -39,6 +49,7 @@ from .sync_job import (
     start_index_job,
     start_scan_job,
     start_task_job,
+    start_upload_books_job,
 )
 
 log = get_logger("onedrive_sync.action")
@@ -62,9 +73,10 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
     _index_checked = pyqtSignal(object)
     _scan_progress = pyqtSignal(object, str)
     _scan_status = pyqtSignal(float, str)
+    _auto_upload_done = pyqtSignal(object)
 
     def genesis(self):
-        """Set up the action icon and job callbacks."""
+        """Set up the action icon, job callbacks and the add-books hook."""
         self._job = None
         self._state: StateStore | None = None
         self._engine: SyncEngine | None = None
@@ -76,6 +88,17 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         self._scan_finished = False
         self._task = ""
         self._next_task = ""
+        #: Automatic upload of books calibre just added (the only non-manual path).
+        self._auto_watcher: LibraryWatcher | None = None
+        self._auto_queue = BookUploadQueue()
+        self._auto_job = None
+        self._auto_state: StateStore | None = None
+        self._auto_engine: SyncEngine | None = None
+        self._auto_library: CalibreLibrary | None = None
+        self._auto_timer = QTimer(self)
+        self._auto_timer.setSingleShot(True)
+        self._auto_timer.setInterval(int(AUTO_UPLOAD_DELAY_MS))
+        self._auto_timer.timeout.connect(self._upload_new_books)
         self.qaction.setIcon(
             get_icons(  # noqa: F821 - injected by calibre's plugin loader
                 "resources/images/onedrive.png", "onedrive_sync"
@@ -89,9 +112,12 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         self._index_checked.connect(self._on_index_checked)
         self._scan_progress.connect(self._on_scan_progress)
         self._scan_status.connect(self._on_scan_status)
+        self._auto_upload_done.connect(self._on_auto_upload_done)
+        self._install_auto_upload()
 
     def shutting_down(self):
-        """Close the sync state database on shutdown."""
+        """Stop watching for new books and close the sync state on shutdown."""
+        self._stop_auto_upload()
         if self._job is None:
             self._close_state()
 
@@ -99,7 +125,11 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
 
     def open_config(self) -> bool:
         """Open the configuration dialog; returns True when it was accepted."""
-        return open_config_dialog(self.gui)
+        accepted = open_config_dialog(self.gui)
+        if accepted:
+            # The folder or the auto-upload toggle may have changed.
+            self._install_auto_upload()
+        return accepted
 
     def sync_now(self, *args):
         """Toolbar entry point: always the manual review flow."""
@@ -114,9 +144,12 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         self._clear_finished_job()
         if self._job is not None:
             return
+        # A manual pass and the automatic upload must not write the state at once.
+        self._abort_auto_upload()
         settings = self._settings_for()
         if settings is None:
             return
+        self._install_auto_upload()
         if not self._prepare_engine(settings):
             return
         if not self._ensure_folder(settings):
@@ -337,31 +370,12 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
 
     def _prepare_engine(self, settings) -> bool:
         configure_logging(settings.debug)
-        state = None
         try:
-            library = CalibreLibrary(self.gui)
-            auth = AuthManager(settings.client_id, ConfigTokenStore())
-            graph = GraphClient(auth)
-            state = StateStore(default_state_path())
             adder = MainThreadBookAdder(
                 lambda path: add_book_to_library(self.gui, path), parent=self.gui
             )
-            linker = MainThreadBookLinker(self._store_link, parent=self.gui)
-            engine = SyncEngine(
-                graph,
-                state,
-                library,
-                settings,
-                add_book=adder,
-                link_book=linker,
-                metadata_reader=read_metadata,
-            )
+            state, library, linker, engine = self._build_engine(settings, add_book=adder)
         except Exception as exc:  # noqa: BLE001 - configuration/runtime failure
-            if state is not None:
-                try:
-                    state.close()
-                except Exception:  # noqa: BLE001 - best effort
-                    pass
             self._close_state()
             log.warning("Could not initialize the OneDrive sync", exc_info=True)
             QMessageBox.warning(
@@ -376,6 +390,189 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         self._adder = adder
         self._linker = linker
         return True
+
+    def _build_engine(self, settings, *, add_book=None):
+        """Build the graph/state/library stack; the caller owns the state.
+
+        The manual flow and the automatic upload both run through this, so both
+        write links, export records and the index the same way. On failure the
+        half-built state is closed here, which keeps the callers' error paths
+        free of connection bookkeeping.
+        """
+        library = CalibreLibrary(self.gui)
+        auth = AuthManager(settings.client_id, ConfigTokenStore())
+        graph = GraphClient(auth)
+        state = StateStore(default_state_path())
+        try:
+            linker = MainThreadBookLinker(self._store_link, parent=self.gui)
+            engine = SyncEngine(
+                graph,
+                state,
+                library,
+                settings,
+                add_book=add_book,
+                link_book=linker,
+                metadata_reader=read_metadata,
+            )
+        except Exception:  # noqa: BLE001 - re-raised for the caller's own message
+            try:
+                state.close()
+            except Exception:  # noqa: BLE001 - a dead connection must not hide the cause
+                log.debug("Could not close the half-built sync state", exc_info=True)
+            raise
+        return state, library, linker, engine
+
+    def _prepare_auto_engine(self, settings) -> bool:
+        """Build a private engine for the automatic upload (never a dialog)."""
+        configure_logging(settings.debug)
+        try:
+            state, library, _linker, engine = self._build_engine(settings)
+        except Exception:  # noqa: BLE001 - one failed add must not stop calibre
+            log.warning("Could not start the automatic OneDrive upload", exc_info=True)
+            return False
+        self._auto_state = state
+        self._auto_library = library
+        self._auto_engine = engine
+        return True
+
+    # -- automatic upload of newly added books ------------------------------
+
+    def _install_auto_upload(self) -> None:
+        """Watch the calibre database for new books, once, when the plugin is set up.
+
+        The watcher is installed even while the automatic upload is switched off:
+        the toggle is read again when a batch is drained, so changing it in the
+        settings takes effect without restarting calibre.
+        """
+        if self._auto_watcher is not None:
+            return
+        settings = load_settings()
+        if not (is_configured(settings) and get_refresh_token()):
+            return
+        try:
+            api = self.gui.current_db.new_api
+        except Exception:  # noqa: BLE001 - no library window yet
+            log.debug("No calibre database to watch yet", exc_info=True)
+            return
+        watcher = LibraryWatcher(api, parent=self)
+        if not watcher.start():
+            return
+        # calibre reports new books from its own DBListener thread; the queue and
+        # the timer belong to the GUI thread, so the delivery is queued explicitly.
+        watcher.books_created.connect(self._on_books_created, Qt.ConnectionType.QueuedConnection)
+        self._auto_watcher = watcher
+
+    def _stop_auto_upload(self) -> None:
+        """Stop watching for new books and forget what is still queued."""
+        watcher, self._auto_watcher = self._auto_watcher, None
+        if watcher is not None:
+            watcher.stop()
+        self._auto_timer.stop()
+        self._auto_queue.clear()
+
+    def _auto_upload_enabled(self) -> bool:
+        """True when a drained batch should really be uploaded."""
+        settings = load_settings()
+        return bool(
+            settings.auto_upload_new_books and is_configured(settings) and get_refresh_token()
+        )
+
+    def _on_books_created(self, book_ids) -> None:
+        """Queue a book calibre has just created and arm the batch timer."""
+        if not self._auto_queue.add_many(book_ids):
+            return
+        self._start_auto_timer()
+
+    def _start_auto_timer(self) -> None:
+        """Wait :data:`AUTO_UPLOAD_DELAY_MS`; a whole import then uploads in one pass."""
+        if not self._auto_timer.isActive():
+            self._auto_timer.start()
+
+    def _upload_new_books(self) -> None:
+        """Upload the queued books, or wait while a manual pass owns the state."""
+        self._clear_finished_auto_job()
+        if not self._auto_queue:
+            return
+        if self._auto_job is not None or self._job is not None:
+            # A manual pass is running. The books are retried later, and anything
+            # that pass imported is linked by then, so it is not uploaded again.
+            self._start_auto_timer()
+            return
+        if not self._auto_upload_enabled():
+            self._auto_queue.clear()
+            return
+        settings = load_settings()
+        if not self._prepare_auto_engine(settings):
+            self._auto_queue.clear()
+            return
+        book_ids = self._auto_queue.take()
+        self._auto_job = start_upload_books_job(
+            self.gui.job_manager,
+            self._auto_engine,
+            book_ids,
+            self._auto_upload_done.emit,
+            description=_("Uploading new books to OneDrive"),
+        )
+        self._show_status(
+            _("Uploading {count} new book(s) to OneDrive…").format(count=len(book_ids))
+        )
+
+    def _abort_auto_upload(self) -> None:
+        """Stop a running automatic upload before a manual pass uses the state."""
+        if self._auto_job is not None:
+            self._abort_job(self._auto_job)
+
+    def _on_auto_upload_done(self, job) -> None:
+        """Report an automatic upload without a window or a dialog.
+
+        The automatic pass runs while the user is working on their library, so a
+        failure belongs in the log and the status bar, not in a modal box.
+        """
+        if job is not self._auto_job:
+            log.debug("Ignoring the late callback of a superseded automatic upload")
+            return
+        self._auto_job = None
+        self._close_auto_state()
+        if job is None:
+            return
+        result = getattr(job, "result", None)
+        if self._job_cancelled(job):
+            log.info("Automatic OneDrive upload cancelled")
+            self._show_status(_("Automatic OneDrive upload cancelled."))
+            return
+        if getattr(job, "failed", False):
+            message = str(getattr(job, "exception", "") or _("Unknown error"))
+            log.warning("Automatic OneDrive upload failed: %s", message)
+            self._show_status(
+                _("Automatic OneDrive upload failed: {message}").format(message=message)
+            )
+            return
+        if result is None:
+            return
+        for message in result.errors:
+            log.warning("Automatic OneDrive upload error: %s", message)
+        self._show_status(result.summary())
+        if self._review_dialog is not None and self._job is None and self._engine is not None:
+            # The open window still shows the book as pending; refresh the rows.
+            self._start_scan()
+
+    def _clear_finished_auto_job(self) -> None:
+        """Forget an automatic upload calibre finished without a callback."""
+        job = self._auto_job
+        if job is None or self._job_is_running(job):
+            return
+        self._auto_job = None
+        self._close_auto_state()
+
+    def _close_auto_state(self) -> None:
+        if self._auto_state is not None:
+            try:
+                self._auto_state.close()
+            except Exception:  # noqa: BLE001 - best effort
+                log.debug("Could not close the automatic sync state", exc_info=True)
+        self._auto_state = None
+        self._auto_engine = None
+        self._auto_library = None
 
     # -- review callbacks ---------------------------------------------------
 
@@ -506,6 +703,7 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         plan = self._scan_plan
         if dialog is None or plan is None:
             return
+        self._abort_auto_upload()
         selected = dialog.selected_entries()
         if not selected:
             QMessageBox.information(self.gui, _("OneDrive Sync"), plan.summary())
@@ -539,6 +737,7 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
 
     def _start_task(self, task: str, status: str | None = None) -> None:
         """Run a bulk review action (upload all / download all / clear) as a job."""
+        self._abort_auto_upload()
         self._task = task
         self._job = start_task_job(
             self.gui.job_manager,

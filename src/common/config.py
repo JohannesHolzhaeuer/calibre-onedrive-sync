@@ -49,12 +49,16 @@ class Settings:
     folder_path: str = ""
     folder_name: str = ""
     #: Legacy configuration fields, kept so old settings still load. The plugin
-    #: now uploads directly into the selected folder and never syncs by itself.
+    #: now uploads directly into the selected folder and never scans, downloads
+    #: or uploads the library by itself; only a freshly added book is uploaded
+    #: straight away (see ``auto_upload_new_books``).
     export_subfolder: str = "Calibre Export"
     export_directly: bool = False
     export_format: str = DEFAULT_EXPORT_FORMAT
     #: Concurrent uploads of a bulk action; 1 is the plain sequential pass.
     upload_workers: int = DEFAULT_UPLOAD_WORKERS
+    #: Upload a book as soon as calibre adds it (the only automatic path).
+    auto_upload_new_books: bool = True
     import_enabled: bool = True
     export_enabled: bool = True
     auto_sync: bool = True

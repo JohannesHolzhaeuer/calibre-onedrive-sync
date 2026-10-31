@@ -21,9 +21,14 @@ Hard product constraints:
 - **Graph access is folder-scoped by behaviour.** The app requests delegated
   `Files.ReadWrite.All`, but the plugin must only touch the folder the user
   selected — and only its **direct children**; subfolders are never entered.
-- **Everything is manual.** No scheduler, startup sync, DB listener or timer may
-  be reintroduced. Uploads, downloads, scans and clean-ups only run from an
-  explicit toolbar click or a button in the review window.
+- **Everything is manual — with one documented exception.** No scheduler,
+  startup sync or background timer may be introduced. Uploads, downloads, scans
+  and clean-ups only run from an explicit toolbar click or a button in the review
+  window. The single automatic path is the **add-books hook**
+  (`gui/library_watch.py` → `SyncEngine.upload_books`): a book calibre has just
+  *created* is uploaded on its own, in a calibre job, and the user can switch
+  that off with `Settings.auto_upload_new_books`. Nothing else may ever start by
+  itself.
 - **Runtime dependencies are calibre-bundled only.** `pytest`, `pytest-cov` and
   `ruff` are dev/CI-only and must never be imported by plugin runtime code.
 - **Never sync a library into itself.** The plugin works remotely, but keep the
@@ -44,6 +49,7 @@ Hard product constraints:
 │   ├── plugin-import-name-onedrive_sync.txt   # calibre import-namespace marker
 │   ├── common/                    # calibre-independent, unit-testable logic
 │   │   ├── auth.py                # access-token cache + refresh-token store
+│   │   ├── auto_upload.py         # queue of newly added books awaiting upload
 │   │   ├── config.py              # persistent settings + token storage
 │   │   ├── defaults.py            # shared public app ID
 │   │   ├── errors.py              # typed plugin errors
@@ -65,6 +71,7 @@ Hard product constraints:
 │   │   ├── config_widget.py       # configuration dialog
 │   │   ├── folder_picker.py       # Graph-backed OneDrive folder browser
 │   │   ├── library.py             # calibre DB adapter + add-book/identifier helper
+│   │   ├── library_watch.py       # calibre DB listener for newly created books
 │   │   ├── review_dialog.py       # matching window (bulk actions + row upload/download/delete)
 │   │   └── sync_job.py            # ThreadedJob (index/scan/apply/task) + GUI-thread marshalling
 │   └── resources/images/          # toolbar icon
@@ -246,6 +253,25 @@ report to compare against). To check patch coverage locally, run
   a simple PUT, per chunk above `SIMPLE_UPLOAD_LIMIT`), which is what makes the
   rate move inside a single large file. The engine's `clock` is injected, so
   tests advance time by hand and never sleep.
+- **A newly added book is uploaded on its own.** `LibraryWatcher`
+  (`gui/library_watch.py`) registers `Cache.add_listener` on
+  `gui.current_db.new_api` and forwards `EventType.book_created` to the GUI
+  thread; nothing else is registered, so conversions, edits and deletions stay
+  manual. The action queues the ids in `common.auto_upload.BookUploadQueue` and
+  drains them `AUTO_UPLOAD_DELAY_MS` (2.5 s) later — calibre writes the format
+  files *after* the book record, and a whole import must become one pass, not one
+  pass per book. `SyncEngine.upload_books(book_ids)` then uploads just those
+  books (no listing, index flushed from the state) and skips any book that
+  already has a link; that check is why a book imported from OneDrive is never
+  uploaded back as a second copy. The pass uses `_build_engine`, which the manual
+  flow shares, runs in an `UploadBooksJob`, and reports to the log and the status
+  bar only — no window, no modal box. While a manual job runs, the batch waits
+  (the timer is re-armed) instead of writing the same state concurrently, and a
+  manual click kills a running automatic pass first. `shutting_down` stops the
+  listener (`Cache.remove_listener`, with a strong reference to the bound method
+  because calibre keeps only a weakref). `Settings.auto_upload_new_books`
+  switches the whole thing off; the watcher stays installed, the toggle is read
+  when the batch is drained.
 - **The list keeps up with a running transfer.** `_finish_upload` *returns* the
   finished row (a `ReconcileEntry` is frozen, so rows are values and are never
   mutated) and `_publish_rows(plan, rows)` puts each new row at its old position
@@ -295,11 +321,10 @@ report to compare against). To check patch coverage locally, run
   window aborts the scan (`job.abort`). There is no other entry point into the
   engine.
 - `config_widget.py` only exposes the client ID, sign-in, folder, export format,
-  parallel uploads and debug toggle. The remaining `Settings` fields
-  (`export_subfolder`,
-  `export_directly`, `export_enabled`, `import_enabled`, `auto_sync`,
-  `sync_interval_minutes`) are legacy compatibility only — do not wire them back
-  into behaviour.
+  parallel uploads, the automatic upload of newly added books and the debug
+  toggle. The remaining `Settings` fields (`export_subfolder`, `export_directly`,
+  `export_enabled`, `import_enabled`, `auto_sync`, `sync_interval_minutes`) are
+  legacy compatibility only — do not wire them back into behaviour.
 
 ## When adding a feature
 

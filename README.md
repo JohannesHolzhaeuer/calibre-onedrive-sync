@@ -11,9 +11,11 @@ prefilled Application (client) ID with their own app registration.
 
 ## What it does
 
-Everything is **manual**. The plugin never syncs at startup, on a timer or when
-the library changes: nothing leaves your machine and nothing is imported until
-you click the toolbar button. It only ever looks at the **direct children of the
+Everything is **manual**, with one exception: a book you add to calibre is
+uploaded right away (switchable in the settings). The plugin never syncs at
+startup, on a timer or every time the library changes: apart from that one
+newly added book, nothing leaves your machine and nothing is imported until you
+click the toolbar button. It only ever looks at the **direct children of the
 selected folder** — subfolders are never read.
 
 - **Stored folder**: the toolbar button uses the OneDrive folder from the
@@ -30,6 +32,13 @@ selected folder** — subfolders are never read.
 - **Exports** calibre books as **EPUB** (preferred) or **PDF** directly into the
   selected folder. Re-exporting updates the same remote file instead of creating
   duplicates.
+- **New books go up immediately**: when calibre adds a book (Add books, drag and
+  drop, an import from elsewhere), the plugin uploads it a couple of seconds
+  later in the background — no click, no window. Books that are already linked to
+  OneDrive are skipped, so importing *from* OneDrive never creates a second copy.
+  The job shows up in calibre's job panel and the status bar; failures are only
+  logged, never a popup. Turn it off with *Upload newly added books
+  automatically* in the settings.
 - **Matches before syncing**: the review window fills in while OneDrive is
   scanned: local books first, then their OneDrive counterparts, then
   metadata-based refinements. It lists what would be uploaded or downloaded and
@@ -153,11 +162,15 @@ Open *Preferences → Plugins → Customize plugin → OneDrive Sync*:
 6. Add the **OneDrive Sync** button to a toolbar via *Preferences → Toolbars &
    menus*. If the plugin is not configured yet, the first click opens this
    dialog.
+7. **Upload newly added books automatically** is on by default: adding a book to
+   calibre uploads it a moment later. Untick it to keep every upload behind a
+   click.
 
-There is no automatic sync and no interval to configure. The configuration is
-stored in calibre's settings. The refresh token is stored in the platform
-keyring when available and otherwise in calibre's JSON config; the short-lived
-access token is never written to disk.
+There is no automatic scan, no import that runs by itself and no interval to
+configure; the only automatic transfer is the upload of a freshly added book.
+The configuration is stored in calibre's settings. The refresh token is stored in
+the platform keyring when available and otherwise in calibre's JSON config; the
+short-lived access token is never written to disk.
 
 ## How syncing behaves
 
@@ -179,6 +192,15 @@ access token is never written to disk.
   a clean-up.
 - **Flat folder only**: only the direct children of the selected folder are
   listed. Nothing inside a subfolder is read, matched, downloaded or deleted.
+- **New books upload themselves**: as soon as calibre creates a book, it is
+  queued and uploaded a couple of seconds later (one pass for a whole import).
+  The pass never lists the folder — it addresses the file it writes and rewrites
+  the index from the sync state — and it skips books that already have an
+  OneDrive link, so an import from OneDrive is not mirrored back. While a manual
+  pass runs, the upload waits for it; clicking the toolbar button stops a running
+  automatic upload. Failures are logged and shown in the status bar, never in a
+  popup, and the setting *Upload newly added books automatically* turns the whole
+  path off.
 - **Bulk review actions**: **Upload all** uploads every book that is not in
   OneDrive yet (existing files are linked, not uploaded again) and rewrites the
   index. **Download all** imports every ebook file it has not imported before,
