@@ -238,7 +238,10 @@ short-lived access token is never written to disk.
   calibre book id in the export filename, then title and author. For remote
   EPUB/PDF files whose names are not conclusive it temporarily downloads the
   file to read its embedded metadata (never importing the book just for this),
-  and caches the result until the file changes.
+  and caches the result until the file changes. If the file's own metadata
+  clearly names a different author, a title-only match is not enough — that is
+  what keeps episodes of a series that share a title but have different guests
+  from being folded into one book.
 - **Import**: lists the direct children of the selected folder, downloads files
   with supported book extensions, and adds them through calibre's normal
   add-books API. The imported file is then **renamed in OneDrive** to the same

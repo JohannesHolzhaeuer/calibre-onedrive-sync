@@ -117,8 +117,15 @@ def _score_titles(
     local_title: str,
     local_tokens: list[str],
     stem: str,
+    author_conflict: bool = False,
 ) -> int:
-    """Score one remote author/title pair against the local book."""
+    """Score one remote author/title pair against the local book.
+
+    ``author_conflict`` means the file's own metadata names an author that
+    matches none of the book's authors. Works that share a title (podcast
+    episodes, anthologies) are then different books, so title-only evidence
+    is capped below the match threshold.
+    """
     if not remote_title:
         return 0
     author_hit = _author_matches(remote_author, local_tokens, stem)
@@ -127,9 +134,13 @@ def _score_titles(
         return 0
 
     if remote_title == local_title:
-        return 98 if author_hit else 90
+        if author_hit:
+            return 98
+        return 60 if author_conflict else 90
     if local_title in remote_title or remote_title in local_title:
-        return 92 if author_hit else 82
+        if author_hit:
+            return 92
+        return 50 if author_conflict else 82
 
     ratio = SequenceMatcher(None, remote_title, local_title).ratio()
     if ratio >= 0.94:
@@ -161,11 +172,22 @@ def match_score(
     stem = normalize_text(os.path.splitext(remote.name)[0])
 
     candidates = list(variants)
+    meta_author = ""
     remote_meta = (metadata or {}).get(remote.id)
     if remote_meta:
         title, authors = remote_meta
         if normalize_text(title):
             candidates.insert(0, (authors, title))
+            meta_author = normalize_text(authors)
+
+    # The file's own author metadata is the strongest evidence that a same-
+    # titled file is a different work (a podcast episode with another guest):
+    # when it is known and matches none of the book's authors, the title-only
+    # scores are capped. A filename candidate that names a matching author
+    # still scores at full strength.
+    author_conflict = (
+        bool(meta_author) and bool(tokens) and not _author_matches(meta_author, tokens, stem)
+    )
 
     best = 0
     for author, title in candidates:
@@ -177,6 +199,7 @@ def match_score(
                 local_title,
                 tokens,
                 stem,
+                author_conflict,
             ),
         )
     return best

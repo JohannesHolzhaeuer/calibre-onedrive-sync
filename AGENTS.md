@@ -240,7 +240,12 @@ report to compare against). To check patch coverage locally, run
   metadata read during the scan resolves files with unusual names; one book is
   assigned at most one remote item, and further copies are offered for deletion.
   A duplicate row names the file that is kept (`Duplicate of … (kept)`), so the
-  row itself — the file that would be deleted — is unambiguous.
+  row itself — the file that would be deleted — is unambiguous. Title-only
+  scores are capped below the threshold when the file's own metadata names an
+  author that matches none of the book's authors (`_score_titles`
+  ``author_conflict``) — that is what keeps same-titled series (podcast
+  episodes with different guests) from collapsing into one book; a filename
+  candidate that names a matching author still scores at full strength.
 - The toolbar click flow in `gui/action.py` is: `_settings_for` →
   `_prepare_engine` → `_ensure_folder` (the stored folder is used as-is;
   `_pick_folder` → `_remember_folder` only when none is stored) → `_open_window`
