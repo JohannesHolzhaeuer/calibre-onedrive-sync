@@ -323,7 +323,11 @@ report to compare against). To check patch coverage locally, run
   `AuthManager.get_access_token` is lock-guarded because Microsoft rotates
   refresh tokens: two concurrent refreshes would burn the token the first one
   stored, so a thread that waits for the lock reuses the fresh token.
-  `download_all` stays serial for the GUI-thread rule below.
+  `download_all` stays serial for the GUI-thread rule below. The scan's
+  metadata probe (`_probe_remote_metadata`) runs in the same kind of pool with
+  the same worker count: `_probe_download` does the Graph download + the pure
+  metadata parse in a worker, while the cache check and `set_remote_metadata`
+  stay on the caller's thread; a cancel stops queueing probes the same way.
 - Listing is streamed: `GraphClient.list_children(..., on_page=...)` reports every
   Graph page, `SyncEngine.scan` turns each page into a `listing` plan snapshot and
   raises `CancelledError` from the page callback, so closing the window stops a

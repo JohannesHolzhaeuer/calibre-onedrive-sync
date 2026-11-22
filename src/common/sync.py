@@ -616,8 +616,14 @@ class SyncEngine:
     ) -> ReconcilePlan:
         """Download unmatched EPUB/PDF files just far enough to read metadata.
 
-        The plan is rebuilt (and pushed to :attr:`on_plan`) while probing, so
-        rows move from "download" to "matched" as metadata becomes available.
+        The download + read of each file runs in a bounded pool (the same worker
+        count as the uploads), because the cost is Graph latency, not file size.
+        Everything that is *not* the network stays on this thread: the SQLite
+        state is not thread-safe, and the plan rebuilds (pushed to
+        :attr:`on_plan`) must run where the review window can see them. The plan
+        is rebuilt while probing, so rows move from "download" to "matched" as
+        metadata becomes available. A cancel stops queueing new probes and lets
+        the ones already on the wire finish.
         """
         if self.metadata_reader is None or not plan.local_books:
             return plan
@@ -632,54 +638,109 @@ class SyncEngine:
             return plan
 
         metadata: dict[str, tuple[str, str]] = {}
-        total = max(1, len(candidates))
-        last_update = time.monotonic()
         current = plan
+        last_update = time.monotonic()
+        #: The cache check stays on this thread: the state is not shared with the pool.
+        queue: list[tuple[int, RemoteItem]] = []
+        for index, remote in enumerate(candidates):
+            drive_id = remote.drive_id or self.settings.drive_id
+            cached = self.state.get_remote_metadata(drive_id, remote.id, remote.e_tag)
+            if cached is None:
+                queue.append((index, remote))
+            elif cached[0] or cached[1]:
+                metadata[remote.id] = cached
+        if metadata:
+            current = self._maybe_update_plan(current, remote_items, metadata, last_update)
+            last_update = time.monotonic()
+        if not queue:
+            if not metadata:
+                return current
+            return self._rebuild_plan(current, remote_items, metadata)
+
+        workers = min(MAX_UPLOAD_WORKERS, max(1, int(self.settings.upload_workers)))
+        total = max(1, len(candidates))
+        done = len(candidates) - len(queue)
         with tempfile.TemporaryDirectory(prefix="onedrive-meta-", dir=self.temp_root) as temp_dir:
-            for index, remote in enumerate(candidates):
-                if self._aborted():
-                    break
-                self._report(
-                    SCAN_LISTING_END + (SCAN_METADATA_END - SCAN_LISTING_END) * (index / total),
-                    _("Reading book metadata {index}/{total}: {name}").format(
-                        index=index + 1, total=total, name=remote.name
-                    ),
-                )
-                drive_id = remote.drive_id or self.settings.drive_id
-                cached = self.state.get_remote_metadata(drive_id, remote.id, remote.e_tag)
-                if cached is not None:
-                    if cached[0] or cached[1]:
-                        metadata[remote.id] = cached
-                        current = self._maybe_update_plan(
-                            current, remote_items, metadata, last_update
+            in_flight: dict[Future, tuple[int, RemoteItem]] = {}
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="onedrive-meta"
+            ) as pool:
+                while queue or in_flight:
+                    if self._aborted():
+                        for future in in_flight:
+                            future.cancel()
+                        break
+                    while queue and len(in_flight) < workers:
+                        index, remote = queue.pop(0)
+                        in_flight[pool.submit(self._probe_download, temp_dir, index, remote)] = (
+                            index,
+                            remote,
                         )
-                        last_update = time.monotonic()
-                    continue
-                try:
-                    path = self._download(remote, temp_dir, prefix=f"{index:04d}-")
-                    info = self.metadata_reader(path, remote.extension)
-                except Exception:  # noqa: BLE001 - metadata is best-effort
-                    log.debug("Could not read metadata for %s", remote.name, exc_info=True)
-                    continue
-                if not info:
-                    continue
-                title = str(info[0] or "")
-                authors = str(info[1] or "")
-                self.state.set_remote_metadata(
-                    drive_id,
-                    remote.id,
-                    title,
-                    authors,
-                    e_tag=remote.e_tag,
-                )
-                if title or authors:
-                    metadata[remote.id] = (title, authors)
-                    current = self._maybe_update_plan(current, remote_items, metadata, last_update)
-                    last_update = time.monotonic()
+                    finished, running = wait(in_flight, return_when=FIRST_COMPLETED, timeout=0.5)
+                    for future in finished:
+                        _index, remote = in_flight.pop(future)
+                        done += 1
+                        found = self._finish_probe(future, remote)
+                        self._report(
+                            SCAN_LISTING_END
+                            + (SCAN_METADATA_END - SCAN_LISTING_END) * (done / total),
+                            _("Reading book metadata {index}/{total}: {name}").format(
+                                index=done, total=total, name=remote.name
+                            ),
+                        )
+                        if found is not None:
+                            metadata[remote.id] = found
+                            current = self._maybe_update_plan(
+                                current, remote_items, metadata, last_update
+                            )
+                            last_update = time.monotonic()
+                    in_flight = {
+                        future: pair for future, pair in in_flight.items() if future in running
+                    }
 
         if not metadata:
             return current
         return self._rebuild_plan(current, remote_items, metadata)
+
+    def _probe_download(
+        self, temp_dir: str, index: int, remote: RemoteItem
+    ) -> tuple[str, str] | None:
+        """Download one file and read its metadata; runs in the probe pool.
+
+        The temporary file is the only input and the read is a pure parse, so a
+        worker never touches the calibre database or the sync state.
+        """
+        path = self._download(remote, temp_dir, prefix=f"{index:04d}-")
+        info = self.metadata_reader(path, remote.extension)
+        if not info:
+            return None
+        return str(info[0] or ""), str(info[1] or "")
+
+    def _finish_probe(self, future: Future, remote: RemoteItem) -> tuple[str, str] | None:
+        """Store one finished probe in the sync state (the caller's thread).
+
+        Returns the metadata when it should reach the plan. A successful read is
+        cached even when it found nothing, so the next scan does not download
+        the file again; a failed probe is not cached and is retried next time.
+        """
+        drive_id = remote.drive_id or self.settings.drive_id
+        try:
+            info = future.result()
+        except Exception:  # noqa: BLE001 - metadata is best-effort
+            log.debug("Could not read metadata for %s", remote.name, exc_info=True)
+            return None
+        if info is None:
+            return None
+        self.state.set_remote_metadata(
+            drive_id,
+            remote.id,
+            info[0],
+            info[1],
+            e_tag=remote.e_tag,
+        )
+        if not (info[0] or info[1]):
+            return None
+        return (info[0], info[1])
 
     def _maybe_update_plan(
         self,

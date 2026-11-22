@@ -228,9 +228,11 @@ short-lived access token is never written to disk.
   folder again, so the rows describe what is in OneDrive now.
 - **Uploads run in parallel, imports do not**: the files go to OneDrive
   concurrently (see **Parallel uploads** above), because that time is mostly
-  request latency. Downloads stay one by one, since adding a book to the calibre
-  library has to happen on calibre's own thread. A cancelled pass stops queueing
-  new files and lets the ones already on the wire finish.
+  request latency. The scan's metadata reads run in the same pool — a folder
+  full of unrecognised files is probed with several concurrent downloads, not
+  one after another. Imports stay one by one, since adding a book to the
+  calibre library has to happen on calibre's own thread. A cancelled pass stops
+  queueing new files and lets the ones already on the wire finish.
 - **Matching**: a saved OneDrive link wins, then the `calibre-onedrive-index.json`
   written by the plugin (item id first, then a unique filename), then the
   calibre book id in the export filename, then title and author. For remote

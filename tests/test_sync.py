@@ -184,6 +184,25 @@ class ClearingGraph(FakeGraph):
         self.recursive = [item for item in self.recursive if item.id != item_id]
 
 
+class BarrierProbeGraph(FakeGraph):
+    """Downloads that only finish once ``party`` of them run at the same time.
+
+    The barrier is the only way to *prove* the probes overlap without sleeping:
+    if the engine ever probes serially, the first ``wait`` times out, the probe
+    fails, and the reader is never called for every file.
+    """
+
+    def __init__(self, party=3) -> None:
+        super().__init__()
+        self.barrier = threading.Barrier(party, timeout=5)
+        self.threads: set[int] = set()
+
+    def download(self, drive_id, item_id, dest):
+        self.threads.add(threading.get_ident())
+        self.barrier.wait()
+        super().download(drive_id, item_id, dest)
+
+
 class ConcurrencyGraph(FakeGraph):
     """Uploads that only finish once ``party`` of them run at the same time.
 
@@ -461,6 +480,81 @@ def test_scan_ignores_metadata_failures(tmp_path):
     state.close()
 
 
+def test_scan_probes_metadata_in_parallel(tmp_path):
+    graph = BarrierProbeGraph(party=3)
+    graph.recursive = [remote(f"f{i}", f"file{i:02d}.epub", size=4) for i in range(3)]
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    seen = []
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        metadata_reader=lambda _path, _fmt: seen.append(1) or ("Other", "Writer"),
+    )
+
+    plan = engine.scan()
+
+    # Three probes ran at once, on three different worker threads.
+    assert len(graph.threads) == 3
+    assert len(seen) == 3
+    assert [entry.status for entry in plan.entries if entry.remote is not None] == ["download"] * 3
+    state.close()
+
+
+def test_scan_probe_stops_queuing_after_abort(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote(f"f{i}", f"file{i:02d}.epub", size=4) for i in range(8)]
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        metadata_reader=lambda _path, _fmt: ("The Book", "Jane Doe"),
+        # Flips on the first finished download, i.e. mid-probe.
+        should_abort=lambda: bool(graph.downloaded),
+    )
+
+    with pytest.raises(CancelledError):
+        engine.scan()
+
+    # Queueing stopped: at most the workers' in-flight probes plus what they
+    # had already picked up ran, so not all eight files were downloaded.
+    assert len(graph.downloaded) < 8
+    state.close()
+
+
+def test_scan_caches_empty_metadata_without_matching(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote("scan", "scan001.epub")]
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        metadata_reader=lambda _path, _fmt: ("", ""),
+    )
+
+    plan = engine.scan()
+
+    assert plan.entry("remote:drive:scan").status == "download"
+    # The empty result is cached, so the next scan does not download again.
+    assert state.get_remote_metadata("drive", "scan") == ("", "")
+    downloaded = len(graph.downloaded)
+    plan = engine.scan()
+    assert plan.entry("remote:drive:scan").status == "download"
+    assert len(graph.downloaded) == downloaded
+    state.close()
+
+
 def test_scan_aborts_with_cancelled_error(tmp_path):
     graph = FakeGraph()
     graph.recursive = [remote("scan", "scan001.epub")]
@@ -672,7 +766,9 @@ def test_scan_cancels_during_the_metadata_probe(tmp_path):
     )
     with pytest.raises(CancelledError):
         engine.scan()
-    assert len(graph.downloaded) == 1
+    # Both probes were already on the wire when the abort came, so both finish;
+    # a cancel stops queueing, it does not kill in-flight probes.
+    assert len(graph.downloaded) == 2
     state.close()
 
 
