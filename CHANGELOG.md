@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/compare/v0.6.0...v0.7.0) (2026-11-22)
+
+
+### Features
+
+* make the review window non-modal ([#33](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/33)) ([f53683b](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/f53683b5b06068b3bc969994bd24c48d21041fd1))
+* rename imported files to the export name ([#35](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/35)) ([9fff9c1](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/9fff9c1cbf74de83483814390928230296b3982d))
+
 ## [0.6.0](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/compare/v0.5.0...v0.6.0) (2026-10-31)
 
 
