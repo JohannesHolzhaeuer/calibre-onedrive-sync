@@ -327,23 +327,25 @@ def run_index_check(action) -> None:
 def click_through(action, monkeypatch, *, accept=False, while_open=None, choice="apply"):
     """Simulate the review window: run ``while_open(dialog)``, then close it.
 
+    The window is non-modal, so ``show`` is where the event loop would deliver
+    the index-check callback; closing it goes through ``accept``/``reject``.
     ``choice`` mirrors the button the user clicked; ``"apply"`` is also what
     pressing Enter does.
     """
     captured = {}
 
-    def fake_exec(dialog):
-        captured["dialog"] = dialog
-        # The modal loop is where calibre delivers the index-check callback.
+    def fake_show(self):
+        captured["dialog"] = self
         run_index_check(action)
         if while_open is not None:
-            while_open(dialog)
+            while_open(self)
         if accept:
-            dialog._request(choice)
-            return QDialog.DialogCode.Accepted
-        return QDialog.DialogCode.Rejected
+            self._request(choice)
+            self.accept()
+        else:
+            self.reject()
 
-    monkeypatch.setattr(action_mod.ReviewDialog, "exec", fake_exec)
+    monkeypatch.setattr(action_mod.ReviewDialog, "show", fake_show)
     action.review_now()
     return captured["dialog"]
 
@@ -440,6 +442,62 @@ def test_closing_the_window_while_scanning_aborts_the_scan(monkeypatch):
     run_scan(action)  # the worker notices the abort
     assert action._state is None
     assert action.gui.status_bar.messages[-1] == "OneDrive matching cancelled."
+
+
+def test_closing_the_open_window_releases_the_flow(monkeypatch):
+    action = review_action(monkeypatch)
+    dialog = ReviewDialog()
+    dialog.finished.connect(action._on_review_finished)  # as _open_window does
+    action._review_dialog = dialog
+    action._scan_finished = True
+    action._scan_plan = sample_plan()
+    deleted = []
+    monkeypatch.setattr(dialog, "deleteLater", lambda: deleted.append(1))
+
+    dialog.finished.emit(QDialog.DialogCode.Accepted)
+
+    assert action._review_dialog is None
+    assert deleted == [1]  # the non-modal window is destroyed, not just hidden
+    assert action._state is None  # a closed, finished window releases the sync state
+    assert sample_plan().summary() in action.gui.status_bar.messages
+
+
+def test_a_finished_signal_without_a_window_is_ignored(monkeypatch):
+    action = review_action(monkeypatch)
+    action._review_dialog = None
+
+    action._on_review_finished(QDialog.DialogCode.Rejected)
+
+    assert action._state is not None  # a stray signal must not release the flow
+
+
+def test_a_second_toolbar_click_focuses_the_open_window(monkeypatch):
+    action = review_action(monkeypatch)
+    dialog = ReviewDialog()
+    action._review_dialog = dialog
+    raised = []
+    monkeypatch.setattr(dialog, "raise_", lambda: raised.append("raise"))
+    monkeypatch.setattr(dialog, "activateWindow", lambda: raised.append("activate"))
+    opened = []
+    monkeypatch.setattr(action, "_open_window", lambda: opened.append(1))
+
+    action.sync_now()
+
+    assert raised == ["raise", "activate"]
+    assert opened == []  # no second flow is started behind the open window
+    assert action._review_dialog is dialog
+
+
+def test_focusing_a_broken_window_is_only_logged(monkeypatch):
+    action = make_action(monkeypatch)
+
+    class Broken:
+        def raise_(self):
+            raise RuntimeError("widget gone")
+
+    action._review_dialog = Broken()
+
+    action._focus_window()  # a dead wrapper must not block the toolbar click
 
 
 def test_scan_failure_is_reported_inside_the_window(monkeypatch):
@@ -1120,14 +1178,14 @@ def test_review_now_opens_the_window_before_touching_the_network(monkeypatch):
     action = review_action(monkeypatch)
     seen = {}
 
-    def fake_exec(dialog):
+    def fake_show(self):
         # The window is on screen while the index check is still queued.
-        seen["rows_at_open"] = dialog.tree.topLevelItemCount()
-        seen["status_at_open"] = dialog.status.text()
+        seen["rows_at_open"] = self.tree.topLevelItemCount()
+        seen["status_at_open"] = self.status.text()
         seen["job_queued"] = len(action.gui.job_manager.jobs)
-        seen["apply_enabled"] = dialog.apply_button.isEnabled()
+        seen["apply_enabled"] = self.apply_button.isEnabled()
 
-    monkeypatch.setattr(action_mod.ReviewDialog, "exec", fake_exec)
+    monkeypatch.setattr(action_mod.ReviewDialog, "show", fake_show)
     monkeypatch.setattr(action, "_pick_folder", lambda _settings: pytest.fail("no picker"))
     saved = []
     monkeypatch.setattr(action_mod, "save_settings", lambda value: saved.append(value))
@@ -1155,13 +1213,14 @@ def test_review_now_asks_for_a_folder_when_none_is_configured(monkeypatch):
     monkeypatch.setattr(action, "_pick_folder", fake_picker)
     saved = []
     monkeypatch.setattr(action_mod, "save_settings", lambda value: saved.append(value))
-    monkeypatch.setattr(action_mod.ReviewDialog, "exec", lambda dialog: QDialog.DialogCode.Rejected)
+    monkeypatch.setattr(action_mod.ReviewDialog, "show", lambda self: None)
 
     action.review_now()
 
     assert picked == [1]
     assert saved and saved[0].folder_id == "f2"
     assert action.gui.job_manager.jobs  # the window opened and the check started
+    assert action._review_dialog is not None  # non-modal: still open after the click
 
 
 def test_a_missing_folder_asks_for_a_new_one(monkeypatch):

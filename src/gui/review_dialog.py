@@ -87,6 +87,13 @@ class ReviewDialog(QDialog):
 
     def _build_ui(self) -> None:
         self.setWindowTitle(_("OneDrive Sync – Review matching"))
+        # The window is non-modal and can run transfers for hours, so make sure
+        # it can be minimized and maximized on every platform.
+        self.setWindowFlags(
+            self.windowFlags()
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+        )
         self.resize(980, 560)
         layout = QVBoxLayout(self)
 
