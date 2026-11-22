@@ -269,7 +269,10 @@ report to compare against). To check patch coverage locally, run
   `_scan_status` → `dialog.set_progress`, and `_end_task` shows the summary and
   starts a fresh scan so the rows match what the job did. `_finish_review` no
   longer starts anything — closing the window during a job aborts it.
-  `SyncResult.summary()` is the message that ends a task.
+  `SyncResult.summary()` is the message that ends a task. Every completion
+  callback that ends in that re-scan (the bulk tasks *and* apply's
+  `_on_job_done`) must therefore leave the engine and state alive; the state is
+  closed with the window (`_finish_review` → `_release_review`).
 - **Transfers report speed and time left.** `common.progress.TransferMeter`
   turns bytes into a smoothed rate (EWMA, `MIN_SAMPLE_INTERVAL` guards a ~0 s
   window) plus an ETA; `SyncEngine` owns one per pass, seeded with the total
