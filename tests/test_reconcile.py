@@ -67,6 +67,25 @@ def test_match_score_uses_book_id_and_metadata():
     assert match_score(remote("scan", "scan001.epub"), local, metadata) >= 95
 
 
+def test_match_score_caps_same_title_when_the_file_author_differs():
+    # Podcast episodes: one series title, a different guest author per file.
+    local = book(948, "Die Lama Gang", "Drei gegen Spukerei 20261018")
+    same_guest = remote("ep14", "0014-Die Lama Gang.pdf")
+    other_guest = remote("ep12", "0012-Die Lama Gang.pdf")
+    metadata = {
+        "ep14": ("0014-Die Lama Gang", "Drei gegen Spukerei 20261018"),
+        "ep12": ("0012-Die Lama Gang", "Auf Wolke 7 20261018"),
+    }
+    assert match_score(same_guest, local, metadata) >= MATCH_THRESHOLD
+    # The file says who its guest is, and that is not the book's author.
+    assert match_score(other_guest, local, metadata) < MATCH_THRESHOLD
+    # Without the file's author there is nothing to contradict the title.
+    assert match_score(other_guest, local) >= MATCH_THRESHOLD
+    # A book without authors cannot be contradicted either.
+    anonymous = book(949, "Die Lama Gang")
+    assert match_score(other_guest, anonymous, metadata) >= MATCH_THRESHOLD
+
+
 def test_match_score_does_not_guess_short_titles_without_author():
     local = book(1, "It")
     assert match_score(remote("a", "It.epub"), local) == 0
@@ -165,6 +184,37 @@ def test_plan_marks_second_copy_as_duplicate():
     assert duplicates[0].selectable
     # The row says which of the two files is the duplicate and which stays.
     assert duplicates[0].note == "Duplicate of Jane Doe - The Book.epub (kept)"
+
+
+def test_plan_keeps_same_titled_books_with_different_authors_apart():
+    locals_ = [book(948, "Die Lama Gang", "Drei gegen Spukerei 20261018")]
+    remotes = [
+        remote("kept", "Drei gegen Spukerei 20261018 - Die Lama Gang (948).pdf"),
+        remote("ep12", "0012-Die Lama Gang.pdf"),
+        remote("ep13", "0013-Die Lama Gang.pdf"),
+        remote("ep14", "0014-Die Lama Gang.pdf"),
+    ]
+    plan = build_reconcile_plan(
+        locals_,
+        remotes,
+        links={("drive", "kept"): 948},
+        metadata={
+            "ep12": ("0012-Die Lama Gang", "Auf die Hufe, fertig, los! 20261018"),
+            "ep13": ("0013-Die Lama Gang", "Auf Wolke 7 20261018"),
+            "ep14": ("0014-Die Lama Gang", "Drei gegen Spukerei 20261018"),
+        },
+    )
+    by_remote = {entry.remote.id: entry for entry in plan.entries if entry.remote is not None}
+    assert by_remote["kept"].status == "matched"
+    assert by_remote["kept"].local.book_id == 948
+    # Same series title, different guests: new books, not duplicates.
+    assert by_remote["ep12"].status == "download"
+    assert by_remote["ep12"].local is None
+    assert by_remote["ep13"].status == "download"
+    assert by_remote["ep13"].local is None
+    # Same title and same guest: this really is the episode that is linked.
+    assert by_remote["ep14"].status == "duplicate"
+    assert by_remote["ep14"].local.book_id == 948
 
 
 def test_plan_honours_pdf_preference():
