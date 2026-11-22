@@ -1083,6 +1083,39 @@ def test_apply_selected_without_a_tick_shows_the_summary_and_runs_nothing(monkey
     assert dialog.apply_button.isEnabled()  # still idle, nothing to wait for
 
 
+def test_a_finished_apply_keeps_the_engine_alive_for_the_rescan(monkeypatch):
+    """Regression: the apply callback used to close the state before the
+    re-scan it triggers, so the scan ran with a dead engine and crashed."""
+    action = review_action(monkeypatch)
+    engine = action._engine
+    state = action._state
+    dialog = ReviewDialog(sample_plan(), parent=action.gui)
+    dialog.start_task("apply")
+    action._review_dialog = dialog
+    scans = []
+    monkeypatch.setattr(
+        action_mod,
+        "start_scan_job",
+        lambda _manager, eng, _callback, **_kwargs: scans.append(eng) or "scan",
+    )
+    infos = []
+    monkeypatch.setattr(action_mod.QMessageBox, "information", lambda *args: infos.append(args))
+    action._job = types.SimpleNamespace(
+        failed=False, result=SyncResult(imported=2), killed=False, exception=None
+    )
+
+    action._on_job_done(action._job)
+
+    assert infos and infos[-1][0] is dialog
+    assert dialog._scanning
+    # The re-scan receives the engine, not the state the callback used to
+    # close first; the state stays open with the window.
+    assert scans == [engine]
+    assert action._engine is engine
+    assert action._state is state
+    assert action._job == "scan"
+
+
 def test_clear_backup_clears_the_calibre_identifiers(monkeypatch):
     action = task_action(monkeypatch, "clear_backup")
     library = action._library

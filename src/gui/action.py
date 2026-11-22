@@ -939,9 +939,12 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         if self._is_stale_job(job):
             return
         self._job = None
-        self._close_state()
         if job is None:
+            self._close_state()
             return
+        # The window stays open after an apply, and the fresh scan that
+        # ``_end_task`` starts reuses this engine — the state is closed with
+        # the window (``_finish_review``), exactly like a finished bulk task.
 
         result = getattr(job, "result", None)
         # calibre marks a killed job as failed without an exception, so check
