@@ -142,6 +142,12 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
     def review_now(self) -> None:
         """Open the window at once, then check the index and scan into it."""
         self._clear_finished_job()
+        if self._review_dialog is not None:
+            # The window is non-modal, so a second toolbar click arrives while
+            # it is still open: bring it to the front instead of starting a
+            # second flow behind it.
+            self._focus_window()
+            return
         if self._job is not None:
             return
         # A manual pass and the automatic upload must not write the state at once.
@@ -158,21 +164,41 @@ class OneDriveSyncInterfaceAction(InterfaceAction):
         self._open_window()
 
     def _open_window(self) -> None:
-        """Show the review window first so the user sees the work that follows."""
+        """Show the review window first so the user sees the work that follows.
+
+        The window is non-modal: a long upload or download keeps running while
+        the user works in calibre or minimizes the window, and the flow ends
+        through :meth:`_on_review_finished` when the window closes.
+        """
         dialog = ReviewDialog(parent=self.gui)
         dialog.start_scanning(_("Checking the OneDrive folder for a calibre index…"))
         dialog.bulk_requested.connect(self._on_bulk_request)
+        dialog.finished.connect(self._on_review_finished)
         self._review_dialog = dialog
         self._scan_plan = None
         self._scan_finished = False
         self._task = ""
         self._next_task = ""
         self._check_index()
+        dialog.show()
+
+    def _on_review_finished(self, result: int) -> None:
+        """The review window closed: release it and finish the flow."""
+        dialog = self._review_dialog
+        if dialog is None:
+            return
+        self._review_dialog = None
+        dialog.deleteLater()
+        self._finish_review(dialog, result == QDialog.DialogCode.Accepted)
+
+    def _focus_window(self) -> None:
+        """Bring the open review window to the front."""
+        dialog = self._review_dialog
         try:
-            accepted = dialog.exec() == QDialog.DialogCode.Accepted
-        finally:
-            self._review_dialog = None
-        self._finish_review(dialog, accepted)
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception:  # noqa: BLE001 - a dead wrapper must not block a click
+            log.debug("Could not raise the review window", exc_info=True)
 
     def _configured_folder(self, settings) -> FolderRef | None:
         """The folder from the settings, or ``None`` when none is stored."""

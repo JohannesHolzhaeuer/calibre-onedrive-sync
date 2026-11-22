@@ -234,7 +234,13 @@ report to compare against). To check patch coverage locally, run
   on *Yes* starts the `clear_backup` → `upload_all` chain right there
   (`_next_task`), in the open window. A Graph 404 during the check means the
   stored folder is gone: `_reselect_folder` asks for a new one and reopens the
-  window.
+  window. The review window is **non-modal** — `_open_window` uses `show()` and
+  the flow ends in `_on_review_finished` (the dialog's `finished` signal), so a
+  long transfer keeps running while the user works in calibre or minimizes the
+  window (the minimize and maximize buttons are forced on). A second toolbar
+  click therefore
+  arrives while the window is still open and only raises it (`_focus_window`)
+  instead of starting a second flow.
 - **Bulk actions run inside the open window.** `ReviewDialog.bulk_requested` is
   answered by `_on_bulk_request`, which starts the job and puts the window into
   its busy state (`ReviewDialog.start_task`); progress arrives through

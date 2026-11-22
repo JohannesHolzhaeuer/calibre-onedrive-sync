@@ -944,6 +944,9 @@ class QDialog(QWidget):
         Accepted = 1
         Rejected = 0
 
+    #: Emitted like Qt's ``QDialog::finished`` when the dialog is closed.
+    finished = pyqtSignal(int)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._result = 0
@@ -953,14 +956,16 @@ class QDialog(QWidget):
 
     def done(self, result) -> None:
         self._result = result
+        self.hide()
+        self.finished.emit(result)
 
     def accept(self) -> None:
         self._accepted = True
-        self._result = self.DialogCode.Accepted
+        self.done(self.DialogCode.Accepted)
 
     def reject(self) -> None:
         self._rejected = True
-        self._result = self.DialogCode.Rejected
+        self.done(self.DialogCode.Rejected)
 
     def setWindowModality(self, _modality) -> None:
         pass
