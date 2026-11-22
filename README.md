@@ -236,8 +236,11 @@ short-lived access token is never written to disk.
   and caches the result until the file changes.
 - **Import**: lists the direct children of the selected folder, downloads files
   with supported book extensions, and adds them through calibre's normal
-  add-books API. The source item is immediately stored as the book's OneDrive
-  link, so a later upload does not add it back as a duplicate.
+  add-books API. The imported file is then **renamed in OneDrive** to the same
+  `Author - Title (book ID)` name the plugin's uploads use, so the folder reads
+  like one collection; if that name is already taken by another file, the
+  original name is kept. The source item is immediately stored as the book's
+  OneDrive link, so a later upload does not add it back as a duplicate.
 - **Export**: uploads one EPUB/PDF per book into the selected folder. The remote
   item id is remembered so edits replace the same file. If a file for the same
   book already exists under another name or format, it is linked and adopted

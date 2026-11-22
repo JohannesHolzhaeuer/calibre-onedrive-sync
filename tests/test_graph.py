@@ -219,6 +219,30 @@ def test_delete_item_uses_item_endpoint():
     assert transport.calls[0]["url"].endswith("/drives/drive/items/item")
 
 
+def test_rename_item_patches_the_name_and_returns_the_item():
+    transport = Transport(
+        lambda *_args: {"id": "i", "name": "Jane Doe - The Book (7).epub", "file": {}}
+    )
+    graph_client = GraphClient(FakeAuth(), transport=transport)
+    item = graph_client.rename_item("drive", "i", "Jane Doe - The Book (7).epub")
+
+    assert item.id == "i"
+    assert item.name == "Jane Doe - The Book (7).epub"
+    assert transport.calls[0]["method"] == "PATCH"
+    assert transport.calls[0]["url"].endswith("/drives/drive/items/i")
+    assert json.loads(transport.calls[0]["data"]) == {"name": "Jane Doe - The Book (7).epub"}
+
+
+def test_rename_item_reports_a_conflict_when_the_name_is_taken():
+    graph_client, _auth = client(
+        lambda *_args: HttpError(409, b'{"error":{"code":"itemAlreadyExists"}}')
+    )
+    with pytest.raises(GraphError) as caught:
+        graph_client.rename_item("drive", "i", "taken.epub")
+
+    assert caught.value.status == 409
+
+
 def test_upload_simple(tmp_path):
     path = tmp_path / "book.epub"
     path.write_bytes(b"data")
@@ -403,6 +427,24 @@ def test_a_stalled_read_is_retried():
     item = graph_client.get_item("d", "i")
 
     assert item.name == "ebook"
+    assert state["calls"] == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_a_stalled_rename_is_retried():
+    sleeps = []
+    state = {"calls": 0}
+
+    def handler(_method, _url, _kwargs):
+        state["calls"] += 1
+        if state["calls"] < 3:
+            raise HttpError(0, "The read operation timed out")
+        return {"id": "i", "name": "new.epub", "file": {}}
+
+    graph_client, _auth = client(handler, sleep=sleeps.append)
+    item = graph_client.rename_item("d", "i", "new.epub")
+
+    assert item.name == "new.epub"
     assert state["calls"] == 3
     assert sleeps == [1.0, 2.0]
 

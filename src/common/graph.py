@@ -31,7 +31,9 @@ GRAPH_TIMEOUT = 60
 #: A folder with many files is read page by page; a single stalled page must not
 #: end the whole scan, so transient transport failures are retried.
 TRANSPORT_RETRIES = 3
-RETRIABLE_METHODS = frozenset({"GET", "DELETE"})
+#: Methods that are safe to repeat when the transport itself fails: GET and
+#: DELETE are idempotent, and a PATCH that only sets a name is as well.
+RETRIABLE_METHODS = frozenset({"GET", "DELETE", "PATCH"})
 
 
 def _quote(value: str) -> str:
@@ -314,6 +316,16 @@ class GraphClient:
     def delete_item(self, drive_id: str, item_id: str) -> None:
         """Move an item to the OneDrive recycle bin."""
         self._request("DELETE", _item_url(drive_id, item_id))
+
+    def rename_item(self, drive_id: str, item_id: str, name: str) -> RemoteItem:
+        """Rename a file within its folder and return the item as it stands now.
+
+        Graph answers a rename with the updated item, which carries the new
+        ``eTag`` the plugin stores with the book link. Renaming onto a name that
+        another file in the folder already uses is a ``GraphError(409)``.
+        """
+        data = self._request("PATCH", _item_url(drive_id, item_id), data={"name": name})
+        return remote_from_json(data, drive_id)
 
     def create_upload_session(
         self,

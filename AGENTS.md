@@ -198,6 +198,16 @@ report to compare against). To check patch coverage locally, run
   whose item id is missing from the listing (and the action clears the calibre
   `onedrive` identifier of those books), so deleting files in OneDrive by hand is
   picked up on the next scan instead of leaving the books marked as linked.
+- A downloaded file is renamed in OneDrive the way an upload would have named
+  it. `_apply_download` (shared by `download_all` and the review window's
+  download rows) calls `_rename_imported` after the book is in calibre: the
+  target is `build_export_name` of the imported book's calibre title/authors
+  with the file's own extension, sent as a `PATCH` through
+  `GraphClient.rename_item`. The import record, the book link, the folder index
+  and the window's row are all written with the renamed item. The rename is
+  best-effort: an existing target name (Graph 409) or any other Graph error
+  keeps the old name and lands in the result's errors — the import itself
+  already succeeded, so it is never counted as a failure.
 - Book links are stored twice: in the `book_links` SQLite table for fast
   matching and in the calibre `identifiers` field under the `onedrive` key (web
   URL, or item id when Graph has no URL). The review window persists matches for

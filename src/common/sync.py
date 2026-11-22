@@ -375,12 +375,13 @@ class SyncEngine:
                 size = int(entry.remote.size or 0) if entry.remote else 0
                 started = self.clock()
                 try:
-                    self._apply_download(entry, temp_dir, position, result)
+                    final = self._apply_download(entry, temp_dir, position, result)
                     meter.add(size)
                     changed.append(
                         replace(
                             entry,
                             status="matched",
+                            remote=final,
                             transfer=format_transfer(size, self.clock() - started),
                         )
                     )
@@ -488,12 +489,13 @@ class SyncEngine:
                 size = int(entry.remote.size or 0) if entry.remote else 0
                 try:
                     if entry.status == "download":
-                        self._apply_download(entry, temp_dir, index, result)
+                        final = self._apply_download(entry, temp_dir, index, result)
                         meter.add(size)
                         changed.append(
                             replace(
                                 entry,
                                 status="matched",
+                                remote=final,
                                 transfer=format_transfer(size, self.clock() - started),
                             )
                         )
@@ -966,7 +968,13 @@ class SyncEngine:
         temp_dir: str,
         index: int,
         result: SyncResult,
-    ) -> None:
+    ) -> RemoteItem:
+        """Import one row's file into calibre; returns the file as it stands now.
+
+        The file is renamed before the state is written, so the import record,
+        the book link and the folder index all describe the name the file has
+        in OneDrive afterwards.
+        """
         remote = entry.remote
         if remote is None:
             raise SyncError("No OneDrive file for this row.")
@@ -975,6 +983,7 @@ class SyncEngine:
         if not book_id:
             raise SyncError("calibre did not return a book id.")
         drive_id = remote.drive_id or self.settings.drive_id
+        remote = self._rename_imported(drive_id, remote, book_id, result)
         self.state.mark_imported(
             drive_id,
             remote.id,
@@ -985,6 +994,61 @@ class SyncEngine:
         )
         self._persist_link(book_id, remote)
         result.imported += 1
+        return remote
+
+    def _rename_imported(
+        self,
+        drive_id: str,
+        remote: RemoteItem,
+        book_id: int,
+        result: SyncResult,
+    ) -> RemoteItem:
+        """Rename an imported file the way an upload would have named it.
+
+        A download keeps the book in calibre and the file in OneDrive; giving
+        the file the ``Author - Title (book id)`` name every uploaded file has
+        is what makes the folder read like one collection. A rename that fails
+        — the target name is already taken, or Graph refuses it — keeps the old
+        name, because the import itself is already done.
+        """
+        try:
+            name = build_export_name(
+                self.library.title(book_id),
+                self.library.authors(book_id),
+                book_id,
+                remote.extension or "bin",
+            )
+        except Exception:  # noqa: BLE001 - the import is done, the name is cosmetic
+            log.warning(
+                "Could not read book %s for the OneDrive rename; keeping %s",
+                book_id,
+                remote.name,
+                exc_info=True,
+            )
+            return remote
+        if name.casefold() == remote.name.casefold():
+            return remote
+        try:
+            renamed = self.graph.rename_item(drive_id, remote.id, name)
+        except GraphError as exc:
+            if exc.status == 409:
+                message = _(
+                    "Kept the OneDrive name {old}: {new} is already used by another file."
+                ).format(old=remote.name, new=name)
+            else:
+                message = _("Could not rename {old} in OneDrive: {error}").format(
+                    old=remote.name, error=exc
+                )
+            result.errors.append(message)
+            log.warning(
+                "Could not rename %s to %s in OneDrive",
+                remote.name,
+                name,
+                exc_info=exc.status != 409,
+            )
+            return remote
+        log.info("Renamed %s to %s in OneDrive", remote.name, renamed.name)
+        return renamed
 
     def _apply_delete(self, entry: ReconcileEntry, result: SyncResult) -> None:
         remote = entry.remote
