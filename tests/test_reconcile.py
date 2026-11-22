@@ -163,6 +163,8 @@ def test_plan_marks_second_copy_as_duplicate():
     assert duplicates[0].can_delete
     assert not duplicates[0].default_selected
     assert duplicates[0].selectable
+    # The row says which of the two files is the duplicate and which stays.
+    assert duplicates[0].note == "Duplicate of Jane Doe - The Book.epub (kept)"
 
 
 def test_plan_honours_pdf_preference():

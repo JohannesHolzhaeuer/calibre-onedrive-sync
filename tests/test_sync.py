@@ -23,6 +23,7 @@ from onedrive_sync.common.state import StateStore
 from onedrive_sync.common.sync import (
     SyncEngine,
     build_export_name,
+    rename_preview,
     sanitize_filename,
 )
 
@@ -286,6 +287,11 @@ def test_filename_helpers():
     name = build_export_name("", "", 7, "EPUB")
     assert name == "Unknown author - Book 7 (7).epub"
     assert build_export_name("A", "B", 1, "pdf") == "B - A (1).pdf"
+    # The preview mirrors the export name, with a placeholder for the book id
+    # calibre has not assigned yet.
+    assert rename_preview("The Book", "Jane Doe", "EPUB") == "Jane Doe - The Book (ID).epub"
+    assert rename_preview("A", "B", "pdf") == "B - A (ID).pdf"
+    assert rename_preview("", "", "mobi") == "Unknown author - Untitled (ID).mobi"
 
 
 def test_scan_matches_and_reads_remote_metadata(tmp_path):
@@ -316,6 +322,64 @@ def test_scan_matches_and_reads_remote_metadata(tmp_path):
     assert statuses.count("duplicate") == 1
     assert seen and seen[0][1] == "epub"
     assert state.get_remote_metadata("drive", "scan") == ("The Book", "Jane Doe")
+    state.close()
+
+
+def test_scan_previews_the_rename_of_download_rows(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [
+        remote("scan", "scan001.epub", size=4),
+        remote("plain", "Plain Name.pdf", size=4),
+    ]
+    library = FakeLibrary()
+    _local_book(library, 1, "The Book", "Jane Doe")
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        metadata_reader=lambda path, fmt: (
+            ("Space Odyssey", "Arthur C. Clarke") if "scan001" in path else None
+        ),
+    )
+
+    plan = engine.scan()
+
+    rows = {entry.remote.id: entry for entry in plan.entries if entry.remote is not None}
+    # The probed title and authors make the preview concrete.
+    assert rows["scan"].status == "download"
+    assert rows["scan"].note == (
+        "Will be renamed in OneDrive to Arthur C. Clarke - Space Odyssey (ID).epub after import"
+    )
+    # Without a probe the file name stands in for the title.
+    assert rows["plain"].status == "download"
+    assert rows["plain"].note == (
+        "Will be renamed in OneDrive to Unknown author - Plain Name (ID).pdf after import"
+    )
+    state.close()
+
+
+def test_scan_previews_the_rename_without_a_metadata_probe(tmp_path):
+    # No local books means no probe runs at all; the file name still previews.
+    graph = FakeGraph()
+    graph.recursive = [remote("plain", "Plain Name.pdf", size=4)]
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        metadata_reader=lambda _path, _fmt: ("The Book", "Jane Doe"),
+    )
+
+    plan = engine.scan()
+
+    assert plan.entries[0].status == "download"
+    assert plan.entries[0].note == (
+        "Will be renamed in OneDrive to Unknown author - Plain Name (ID).pdf after import"
+    )
     state.close()
 
 
@@ -456,6 +520,36 @@ def test_apply_plan_uploads_downloads_and_deletes(tmp_path):
     # The downloaded file gets the name an upload would have chosen for book 5.
     assert graph.renamed == [("drive", "d", "Unknown author - Book 5 (5).epub")]
     assert state.get_link(5).name == "Unknown author - Book 5 (5).epub"
+    state.close()
+
+
+def test_apply_plan_clears_the_rename_preview_of_imported_rows(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote("d", "scan001.epub", size=4)]
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    published = []
+    engine, state = make_engine(
+        tmp_path,
+        graph,
+        library,
+        settings,
+        add_book=lambda _path: 7,
+        on_plan=lambda plan, _phase: published.append(plan),
+    )
+
+    plan = engine.scan()
+    entry = plan.entries[0]
+    assert entry.status == "download"
+    assert entry.note.startswith("Will be renamed in OneDrive to")
+
+    result = engine.apply_plan(plan, [entry])
+
+    assert result.imported == 1
+    # The finished row shows the file it ended up as, not the preview.
+    final = published[-1].entry("remote:drive:d")
+    assert final.status == "matched"
+    assert final.note == ""
     state.close()
 
 

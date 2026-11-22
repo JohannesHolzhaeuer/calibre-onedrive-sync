@@ -207,7 +207,12 @@ report to compare against). To check patch coverage locally, run
   and the window's row are all written with the renamed item. The rename is
   best-effort: an existing target name (Graph 409) or any other Graph error
   keeps the old name and lands in the result's errors — the import itself
-  already succeeded, so it is never counted as a failure.
+  already succeeded, so it is never counted as a failure. The review window
+  previews the new name on every download row: `_annotate_rename_previews`
+  (run by `scan` and `_rebuild_plan`) sets the row's note to
+  `rename_preview(title, authors, extension)` — the probed title/authors, the
+  file name as title fallback, and `ID` for the book id calibre has not
+  assigned yet — and `apply_plan` clears the note once the row is imported.
 - Book links are stored twice: in the `book_links` SQLite table for fast
   matching and in the calibre `identifiers` field under the `onedrive` key (web
   URL, or item id when Graph has no URL). The review window persists matches for
@@ -234,6 +239,8 @@ report to compare against). To check patch coverage locally, run
   then a unique casefolded filename), then filename/title evidence. EPUB/PDF
   metadata read during the scan resolves files with unusual names; one book is
   assigned at most one remote item, and further copies are offered for deletion.
+  A duplicate row names the file that is kept (`Duplicate of … (kept)`), so the
+  row itself — the file that would be deleted — is unambiguous.
 - The toolbar click flow in `gui/action.py` is: `_settings_for` →
   `_prepare_engine` → `_ensure_folder` (the stored folder is used as-is;
   `_pick_folder` → `_remember_folder` only when none is stored) → `_open_window`
