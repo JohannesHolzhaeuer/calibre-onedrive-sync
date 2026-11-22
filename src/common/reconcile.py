@@ -540,13 +540,20 @@ def build_reconcile_plan(
         if best_book_id is None and len(tied) > 1:
             best_book_id = next((book_id for book_id in tied if book_id in book_to_remote), None)
         duplicate = best_book_id is not None and best_book_id in book_to_remote
+        if duplicate:
+            # This row's file is the copy that goes; name the one that stays,
+            # so the row says which of the two files is the duplicate.
+            original = book_to_remote[best_book_id]
+            note = _("Duplicate of {name} (kept)").format(name=original.name)
+        else:
+            note = ""
         entries.append(
             ReconcileEntry(
                 key=f"remote:{remote.drive_id}:{remote.id}",
                 status="duplicate" if duplicate else "download",
                 local=local_by_id.get(best_book_id) if best_book_id is not None else None,
                 remote=remote,
-                note=_("Another copy is already linked") if duplicate else "",
+                note=note,
             )
         )
 

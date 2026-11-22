@@ -56,6 +56,31 @@ def test_dialog_select_all_includes_duplicates():
     assert dialog.apply_button.isEnabled()
 
 
+def test_dialog_details_name_the_kept_file_and_the_rename_preview():
+    dialog = ReviewDialog(plan())
+    duplicate = next(entry for entry in dialog.plan.entries if entry.status == "duplicate")
+    # The duplicate row names the file that stays, so it is clear which of the
+    # two files is the copy that would be deleted.
+    assert dialog._items[duplicate.key].text(4) == "Duplicate of Author - Matched.epub (kept)"
+
+    # The engine attaches a rename preview to each download row; the window
+    # shows what the row carries.
+    download = next(entry for entry in dialog.plan.entries if entry.status == "download")
+    previewed = replace(
+        download,
+        note="Will be renamed in OneDrive to Author - Download (ID).epub after import",
+    )
+    dialog.set_plan(
+        replace(
+            dialog.plan,
+            entries=[
+                previewed if entry.key == download.key else entry for entry in dialog.plan.entries
+            ],
+        )
+    )
+    assert dialog._items[previewed.key].text(4) == previewed.note
+
+
 def test_dialog_does_not_check_matched_rows():
     dialog = ReviewDialog(plan())
     matched = next(entry for entry in dialog.plan.entries if entry.status == "matched")

@@ -124,6 +124,23 @@ def build_export_name(title: str, authors: str, book_id: int, fmt: str) -> str:
     return f"{base}.{fmt.lower()}"
 
 
+#: A rename preview cannot know the book id yet — calibre assigns it while the
+#: file is being imported — so it stands in for the number.
+RENAME_PREVIEW_ID = "ID"
+
+
+def rename_preview(title: str, authors: str, fmt: str) -> str:
+    """The name an imported file gets in OneDrive, book id as a placeholder.
+
+    Mirrors :func:`build_export_name`, which the import itself runs once
+    calibre has assigned the real book id.
+    """
+    clean_title = sanitize_filename(title) or "Untitled"
+    clean_authors = sanitize_filename(authors) or "Unknown author"
+    base = sanitize_filename(f"{clean_authors} - {clean_title} ({RENAME_PREVIEW_ID})", limit=180)
+    return f"{base}.{str(fmt or 'bin').lower()}"
+
+
 class SyncEngine:
     """Run one import+export pass over the configured OneDrive folder."""
 
@@ -242,6 +259,9 @@ class SyncEngine:
         plan = self._probe_remote_metadata(plan, remote_items)
         if self._aborted():
             raise CancelledError("Cancelled.")
+        # The probe may return the un-annotated plan early; the rows the user
+        # decides on must all carry their rename preview.
+        plan = self._annotate_rename_previews(plan)
         self._report(1.0, plan.summary())
         self._notify_plan(plan, "final")
         return plan
@@ -496,6 +516,7 @@ class SyncEngine:
                                 entry,
                                 status="matched",
                                 remote=final,
+                                note="",  # the preview is history; the row now shows the file
                                 transfer=format_transfer(size, self.clock() - started),
                             )
                         )
@@ -681,7 +702,7 @@ class SyncEngine:
         metadata: dict[str, tuple[str, str]],
     ) -> ReconcilePlan:
         links = {(link.drive_id, link.item_id): link.book_id for link in self.state.all_links()}
-        return build_reconcile_plan(
+        rebuilt = build_reconcile_plan(
             plan.local_books,
             remote_items,
             links=links or plan.links,
@@ -689,6 +710,35 @@ class SyncEngine:
             metadata=metadata,
             index=plan.index,
         )
+        return self._annotate_rename_previews(rebuilt)
+
+    def _annotate_rename_previews(self, plan: ReconcilePlan) -> ReconcilePlan:
+        """Tell every download row which name its file gets in OneDrive.
+
+        The import renames the file to the export name, so the review window
+        shows the preview now: title and authors come from the metadata probe
+        (the file name stands in when the probe found nothing), the extension
+        is the file's own, and the book id is a placeholder because calibre
+        only assigns it during the import.
+        """
+        changed = False
+        entries: list[ReconcileEntry] = []
+        for entry in plan.entries:
+            if entry.status != "download" or entry.remote is None:
+                entries.append(entry)
+                continue
+            title, authors = plan.metadata.get(entry.remote.id, ("", ""))
+            if not title:
+                title = os.path.splitext(entry.remote.name)[0]
+            name = rename_preview(title, authors, entry.remote.extension or "bin")
+            entries.append(
+                replace(
+                    entry,
+                    note=_("Will be renamed in OneDrive to {name} after import").format(name=name),
+                )
+            )
+            changed = True
+        return plan if not changed else replace(plan, entries=entries)
 
     def _persist_link(self, book_id: int, remote: RemoteItem) -> None:
         link = BookLink.from_remote(book_id, remote)

@@ -42,7 +42,10 @@ selected folder** — subfolders are never read.
 - **Matches before syncing**: the review window fills in while OneDrive is
   scanned: local books first, then their OneDrive counterparts, then
   metadata-based refinements. It lists what would be uploaded or downloaded and
-  which extra copies can be removed. Nothing is transferred until you confirm.
+  which extra copies can be removed. Download rows show the name the file will
+  get in OneDrive after import, and a duplicate row names the copy that is kept,
+  so you always see which of the two files would be deleted. Nothing is
+  transferred until you confirm.
 - **Writes a calibre index** (`calibre-onedrive-index.json`) into the selected
   folder. The index maps each stored file to its calibre book id, so a later
   scan matches by item id instead of guessing from the filename. It is rewritten
