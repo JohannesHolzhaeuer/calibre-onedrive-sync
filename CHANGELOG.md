@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/compare/v0.7.0...v0.8.0) (2026-11-22)
+
+
+### Features
+
+* preview the OneDrive rename and name the kept duplicate in the review list ([#36](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/36)) ([1b0547c](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/1b0547cd392a404fe0ca520c9576b93e94482ea0))
+* probe remote metadata in parallel ([#37](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/37)) ([ce724aa](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/ce724aae6edb2ad5ac8e6e80c4d80d790fd9b3a4))
+
+
+### Bug Fixes
+
+* do not fold same-titled files with different authors into one book ([#38](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/38)) ([2da1040](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/2da1040cdbd530d46efddac6b05ed5c8bd0a166c))
+* keep the engine alive for the rescan after an apply ([#40](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/issues/40)) ([d946f0d](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/commit/d946f0df3784c59a086222e54a888fb5f3a85a2e))
+
 ## [0.7.0](https://github.com/JohannesHolzhaeuer/calibre-onedrive-sync/compare/v0.6.0...v0.7.0) (2026-11-22)
 
 
