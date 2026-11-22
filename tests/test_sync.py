@@ -68,6 +68,8 @@ class FakeGraph:
         self.delete_error = None
         self.get_item_error = None
         self.get_item_calls = []
+        self.renamed = []
+        self.rename_error = None
 
     def list_children(self, drive_id, folder_id, *, on_page=None):
         self.list_calls.append((drive_id, folder_id))
@@ -117,6 +119,12 @@ class FakeGraph:
         if self.delete_error is not None:
             raise self.delete_error
         self.deleted.append((drive_id, item_id))
+
+    def rename_item(self, drive_id, item_id, name):
+        self.renamed.append((drive_id, item_id, name))
+        if self.rename_error is not None:
+            raise self.rename_error
+        return remote(item_id, name, size=len(self.files.get(item_id, b"book")))
 
 
 class FailingIndexGraph(FakeGraph):
@@ -445,6 +453,9 @@ def test_apply_plan_uploads_downloads_and_deletes(tmp_path):
     assert state.get_link(2).item_id == "m"
     assert state.get_link(5).item_id == "d"
     assert {link.book_id for link in links} >= {1, 2, 5}
+    # The downloaded file gets the name an upload would have chosen for book 5.
+    assert graph.renamed == [("drive", "d", "Unknown author - Book 5 (5).epub")]
+    assert state.get_link(5).name == "Unknown author - Book 5 (5).epub"
     state.close()
 
 
@@ -858,6 +869,110 @@ def test_download_all_skips_files_it_imported_before(tmp_path):
 
     assert (first.imported, first.skipped) == (1, 0)
     assert (second.imported, second.skipped) == (0, 1)
+    state.close()
+
+
+def imported_book(library):
+    """An add_book stand-in that registers the imported book's metadata."""
+
+    def add_book(_path):
+        library.books.append(7)
+        library.titles_map[7] = "The Book"
+        library.authors_map[7] = "Jane Doe"
+        return 7
+
+    return add_book
+
+
+def test_download_all_renames_imported_files_to_the_export_name(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote("d", "scan001.epub", size=4)]
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings, add_book=imported_book(library))
+
+    result = engine.download_all()
+
+    assert result.imported == 1
+    assert graph.renamed == [("drive", "d", "Jane Doe - The Book (7).epub")]
+    link = state.get_link(7)
+    assert link.item_id == "d"
+    assert link.name == "Jane Doe - The Book (7).epub"
+    # The import record and the folder index describe the renamed file.
+    assert state.get_import_by_book(7).name == "Jane Doe - The Book (7).epub"
+    index = BookIndex.from_json(graph.uploaded_bytes[INDEX_FILENAME].decode())
+    assert [entry.name for entry in index.books] == ["Jane Doe - The Book (7).epub"]
+    state.close()
+
+
+def test_download_all_keeps_a_name_that_already_matches(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote("d", "jane doe - the book (7).epub", size=4)]
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings, add_book=imported_book(library))
+
+    result = engine.download_all()
+
+    assert result.imported == 1
+    assert graph.renamed == []  # the file already follows the scheme
+    assert state.get_link(7).name == "jane doe - the book (7).epub"
+    state.close()
+
+
+def test_download_all_keeps_the_name_when_the_target_is_taken(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote("d", "scan001.epub", size=4)]
+    graph.rename_error = GraphError(409, "itemAlreadyExists")
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings, add_book=imported_book(library))
+
+    result = engine.download_all()
+
+    assert result.imported == 1  # the book is in calibre either way
+    assert result.failed == 0
+    assert len(result.errors) == 1
+    assert "already used" in result.errors[0]
+    assert state.get_link(7).name == "scan001.epub"
+    state.close()
+
+
+def test_download_all_reports_a_failing_rename(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote("d", "scan001.epub", size=4)]
+    graph.rename_error = GraphError(403, "accessDenied")
+    library = FakeLibrary()
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings, add_book=imported_book(library))
+
+    result = engine.download_all()
+
+    assert result.imported == 1
+    assert result.failed == 0
+    assert any("Could not rename" in error for error in result.errors)
+    assert state.get_link(7).name == "scan001.epub"
+    state.close()
+
+
+def test_download_all_keeps_the_name_when_the_book_metadata_is_gone(tmp_path):
+    graph = FakeGraph()
+    graph.recursive = [remote("d", "scan001.epub", size=4)]
+    library = FakeLibrary()
+
+    def broken_title(_book_id):
+        raise RuntimeError("book vanished")
+
+    library.title = broken_title
+    settings = Settings(drive_id="drive", folder_id="folder")
+    engine, state = make_engine(tmp_path, graph, library, settings, add_book=imported_book(library))
+
+    result = engine.download_all()
+
+    assert result.imported == 1
+    assert result.errors == []  # the import succeeded; only the log mentions it
+    assert graph.renamed == []
+    assert state.get_link(7).name == "scan001.epub"
     state.close()
 
 
